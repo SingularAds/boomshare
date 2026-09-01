@@ -1,0 +1,46 @@
+# The production image (see Dockerfile) copies only requirements.txt, alembic.ini,
+# migrations/ and app/. Everything below is belt-and-braces: nothing here should
+# ever land in an image.
+#
+# NOTE: do not add a blanket "*.md" - app/ai/prompts/*.md and app/ai/knowledge/*.md
+# are loaded at runtime and must stay in the image.
+
+# VCS / CI
+.git
+.github
+.gitignore
+.dockerignore
+
+# Virtual envs
+.venv
+venv
+env
+
+# Python caches
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Tests, tooling, docs - not needed at runtime
+tests
+docs
+scripts
+.vscode
+pyproject.toml
+requirements-dev.txt
+README.md
+
+# Coverage / local data
+.coverage
+htmlcov
+*.db
+*.sqlite3
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key

@@ -1,0 +1,712 @@
+"""The sales pipeline - where a Meta event becomes a conversation.
+
+This module is the one place that reads like the product does:
+
+    inbound message -> identify -> persist -> ask the AI -> validate -> act
+
+Processing an inbound message deliberately runs in **two transactions**:
+
+  1. *ingest* - identify the customer, record attribution, persist the message.
+     Committed immediately, because losing a customer's message because OpenAI
+     was slow would be inexcusable.
+  2. *reply*  - generate and send the answer. If this fails the job is retried,
+     and the retry is safe because the inbound message is already stored and an
+     `ai_decisions` row records whether we already answered it.
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from datetime import timedelta
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.ai import agent, objectives
+from app.ai.schemas import AiDecision
+from app.core import redis as redis_helper
+from app.core.config import get_settings
+from app.core.db import session_scope
+from app.core.errors import InvalidStateTransition, RetryableError
+from app.core.logging import get_logger
+from app.core.trace import trace
+from app.domain import (
+    AiAction,
+    HandlingMode,
+    LeadStatus,
+    MessageDirection,
+    ReminderKind,
+    ReminderStatus,
+    SalesStage,
+)
+from app.integrations.meta.client import MetaClient, get_meta_client
+from app.integrations.meta.schemas import InboundMessageEvent, LeadgenEvent, MessageStatusEvent
+from app.models import AiDecisionLog, Conversation, Customer, Lead
+from app.services import (
+    attribution,
+    conversations as conversation_service,
+    customers as customer_service,
+    downloads as download_service,
+    leads as lead_service,
+    messaging,
+    reminders as reminder_service,
+)
+
+logger = get_logger(__name__)
+
+
+@dataclass(slots=True)
+class InboundContext:
+    conversation_id: uuid.UUID
+    customer_id: uuid.UUID
+    message_id: uuid.UUID
+    phone_number_id: str | None = None
+    provider_message_id: str | None = None
+    should_reply: bool = True
+    skip_reason: str | None = None
+    # Set when a click-to-WhatsApp ad has not been resolved to a campaign yet.
+    ad_needing_campaign: str | None = None
+
+
+# --------------------------------------------------------------------------- #
+# Flow 1: click-to-WhatsApp / ongoing conversation
+# --------------------------------------------------------------------------- #
+async def ingest_inbound(session: AsyncSession, event: InboundMessageEvent) -> InboundContext:
+    """Transaction 1 - identify, attribute and persist. No external calls."""
+    customer, _ = await customer_service.get_or_create(
+        session,
+        event.wa_id,
+        wa_id=event.wa_id,
+        full_name=event.profile_name,
+    )
+
+    lead = None
+    if event.referral is not None:
+        lead = await lead_service.create_from_referral(session, customer, event.referral)
+
+    conversation, _ = await conversation_service.get_or_create_open_conversation(
+        session, customer, lead_id=lead.id if lead else None
+    )
+
+    trace("db", "customer resolved", phone=customer.phone, name=customer.full_name)
+    if lead is not None:
+        trace("db", "lead attributed", source=str(lead.source), ad=str(lead.ad_id)[:8])
+    trace("db", "conversation", id=str(conversation.id)[:8], stage=str(conversation.sales_stage))
+
+    message, created = await conversation_service.record_inbound_message(
+        session,
+        conversation,
+        provider_message_id=event.provider_message_id,
+        content=event.text,
+        message_type=event.message_type,
+        payload=event.raw,
+    )
+    trace(
+        "db" if created else "skip",
+        "inbound message stored" if created else "message already stored - Meta redelivered it",
+        text=event.text,
+    )
+
+    if created:
+        # A reply makes every queued follow-up obsolete.
+        await reminder_service.cancel_pending(
+            session, conversation.id, resolution="customer replied"
+        )
+        await conversation_service.advance_on_inbound(session, conversation)
+        if conversation.lead_id is not None:
+            await lead_service.set_status(
+                session, await session.get(Lead, conversation.lead_id), LeadStatus.RESPONDED
+            )
+
+        # A customer who writes to us has re-opened the door themselves.
+        if customer.is_opted_out:
+            customer.opted_out_at = None
+            logger.info("opt-out cleared by inbound message", extra={"customer_id": str(customer.id)})
+
+    context = InboundContext(
+        conversation_id=conversation.id,
+        customer_id=customer.id,
+        message_id=message.id,
+        phone_number_id=event.phone_number_id,
+        provider_message_id=event.provider_message_id,
+    )
+
+    if lead is not None and lead.campaign_id is None and event.referral is not None:
+        # Resolved after this transaction commits - see handle_inbound_message.
+        context.ad_needing_campaign = event.referral.source_id
+
+    if conversation.handling_mode != HandlingMode.AI:
+        context.should_reply = False
+        context.skip_reason = f"conversation handled by {conversation.handling_mode}"
+    elif not event.text:
+        # Media with no caption: stored for the record, but there is nothing to
+        # answer and guessing would be worse than staying quiet.
+        context.should_reply = False
+        context.skip_reason = f"no text in {event.message_type} message"
+
+    return context
+
+
+async def already_answered(session: AsyncSession, inbound_message_id: uuid.UUID) -> bool:
+    """Did a previous attempt already reply to this message?
+
+    Guards the retry path: the ingest transaction is committed, so a retry must
+    not produce a second reply to the same customer message.
+    """
+    row = (
+        await session.execute(
+            select(AiDecisionLog.id).where(
+                AiDecisionLog.inbound_message_id == inbound_message_id,
+                AiDecisionLog.outbound_message_id.is_not(None),
+            )
+        )
+    ).first()
+    return row is not None
+
+
+async def reply_to_inbound(session: AsyncSession, context: InboundContext) -> None:
+    """Transaction 2 - ask the model, validate, act, send."""
+    settings = get_settings()
+
+    conversation = await session.get(Conversation, context.conversation_id)
+    customer = await session.get(Customer, context.customer_id)
+    if conversation is None or customer is None:  # pragma: no cover - defensive
+        return
+
+    if await already_answered(session, context.message_id):
+        trace("skip", "this message was already answered - not replying twice")
+        logger.info("inbound message already answered", extra={"message_id": str(context.message_id)})
+        return
+
+    history = await conversation_service.load_history(session, conversation.id)
+    link_sent = await download_service.has_link_been_sent(session, customer.id)
+    in_window = conversation_service.within_service_window(conversation)
+    lead = await session.get(Lead, conversation.lead_id) if conversation.lead_id else None
+
+    replies_sent = sum(1 for m in history if m.direction == MessageDirection.OUTBOUND)
+    objective = objectives.next_objective(
+        conversation.sales_stage,
+        conversation.context_notes,
+        download_link_sent=link_sent,
+        replies_sent=replies_sent,
+    )
+
+    trace(
+        "ai",
+        "building the prompt",
+        history=len(history),
+        stage=str(conversation.sales_stage),
+        link_sent=link_sent,
+        in_24h_window=in_window,
+        replies_sent=replies_sent,
+    )
+
+    result = await agent.generate_reply(
+        conversation,
+        customer,
+        history,
+        download_link_sent=link_sent,
+        within_service_window=in_window,
+        directive=objective,
+        lead=lead,
+    )
+
+    if result is None:
+        trace("guard", "the model gave nothing usable - no reply invented, will retry")
+        # The model is down or gave us nothing usable. Fail loudly so the job is
+        # retried rather than inventing a reply.
+        raise RetryableError("ai did not return a usable decision")
+
+    await _apply_decision(
+        session,
+        conversation,
+        customer,
+        result,
+        inbound_message_id=context.message_id,
+        link_already_sent=link_sent,
+        max_reply_characters=settings.max_reply_characters,
+    )
+
+
+async def handle_inbound_message(event: InboundMessageEvent) -> None:
+    """Full pipeline for one customer message."""
+    async with session_scope() as session:
+        context = await ingest_inbound(session, event)
+
+    if context.provider_message_id:
+        # Read receipt is a courtesy; failure here must not affect the reply.
+        await get_meta_client().mark_read(context.provider_message_id, context.phone_number_id)
+
+    if context.ad_needing_campaign:
+        # Deliberately outside the ingest transaction: this is an HTTP call, and
+        # holding a database transaction open across one is how connection pools
+        # get exhausted. Runs once per ad, and never blocks the reply.
+        async with session_scope() as session:
+            await attribution.enrich_ad_from_meta(
+                session, context.ad_needing_campaign, get_meta_client()
+            )
+
+    if not context.should_reply:
+        logger.info(
+            "not replying",
+            extra={"conversation_id": str(context.conversation_id), "reason": context.skip_reason},
+        )
+        return
+
+    settings = get_settings()
+    allowed = await redis_helper.rate_limit(
+        f"inbound:{event.wa_id}", settings.inbound_rate_limit_per_minute
+    )
+    if not allowed:
+        logger.warning("inbound rate limit hit", extra={"wa_id": event.wa_id})
+        return
+
+    # Two messages arriving together must not produce two overlapping replies.
+    async with redis_helper.lock(
+        f"conversation:{context.conversation_id}", settings.ai_reply_lock_seconds
+    ) as acquired:
+        if not acquired:
+            raise RetryableError("conversation is already being answered")
+        async with session_scope() as session:
+            await reply_to_inbound(session, context)
+
+
+# --------------------------------------------------------------------------- #
+# Acting on a validated AI decision
+# --------------------------------------------------------------------------- #
+async def _apply_decision(
+    session: AsyncSession,
+    conversation: Conversation,
+    customer: Customer,
+    result: agent.AgentResult,
+    *,
+    inbound_message_id: uuid.UUID | None,
+    link_already_sent: bool,
+    max_reply_characters: int,
+) -> None:
+    decision: AiDecision = result.decision
+    executed: list[str] = []
+    rejected = dict(result.outcome.rejected)
+
+    raw = result.call.decision
+    trace(
+        "ai",
+        "model returned",
+        intent=str(raw.intent),
+        stage=str(raw.suggested_stage),
+        actions=[a.value for a in raw.actions] or "none",
+        confidence=raw.confidence,
+    )
+    for reason, detail in rejected.items():
+        trace("guard", f"REJECTED {reason}", detail=detail)
+
+    await conversation_service.record_intent(session, conversation, decision.intent)
+    await conversation_service.merge_context_notes(session, conversation, decision.customer_notes)
+
+    applied_stage = await _apply_stage(session, conversation, decision, rejected)
+
+    reply_text = decision.reply_text
+    outbound_message = None
+
+    if not result.usable:
+        # The guardrails rejected the text itself. Nothing is sent; the decision
+        # is still logged so the prompt can be fixed.
+        trace("guard", "reply SUPPRESSED - nothing sent to the customer")
+        rejected.setdefault("reply_suppressed", "reply failed validation")
+    else:
+        reply_text, link = await _attach_download_link(
+            session,
+            conversation,
+            customer,
+            decision,
+            link_already_sent=link_already_sent,
+            reply_text=reply_text,
+            executed=executed,
+            rejected=rejected,
+            max_reply_characters=max_reply_characters,
+        )
+
+        outcome = await messaging.send_reply(
+            session, conversation, customer, reply_text, ai_generated=True
+        )
+        outbound_message = outcome.message
+
+        if outcome.sent:
+            executed.append("send_reply")
+            if link is not None:
+                await download_service.mark_link_sent(session, link)
+                await _try_stage(session, conversation, SalesStage.LINK_SENT, rejected, "link sent")
+        else:
+            rejected["send_failed"] = outcome.reason or "unknown send failure"
+
+    await _apply_actions(session, conversation, customer, decision, executed, rejected)
+    await _ensure_follow_up(session, conversation, customer, executed)
+
+    session.add(
+        AiDecisionLog(
+            conversation_id=conversation.id,
+            inbound_message_id=inbound_message_id,
+            outbound_message_id=outbound_message.id if outbound_message else None,
+            model=result.call.model,
+            intent=decision.intent,
+            # What the model asked for, before validation - that is the version
+            # worth keeping when tuning prompts.
+            suggested_stage=result.call.decision.suggested_stage,
+            applied_stage=applied_stage or conversation.sales_stage,
+            requested_actions={"actions": [a.value for a in decision.actions]},
+            executed_actions={"actions": executed},
+            rejected_reasons=rejected or None,
+            confidence=decision.confidence,
+            raw_response=result.call.raw_response,
+            prompt_tokens=result.call.prompt_tokens,
+            completion_tokens=result.call.completion_tokens,
+            latency_ms=result.call.latency_ms,
+        )
+    )
+    await session.flush()
+
+
+async def _apply_stage(
+    session: AsyncSession,
+    conversation: Conversation,
+    decision: AiDecision,
+    rejected: dict[str, str],
+) -> SalesStage | None:
+    if decision.suggested_stage is None:
+        return None
+    if await _try_stage(
+        session, conversation, decision.suggested_stage, rejected, "suggested by ai"
+    ):
+        return decision.suggested_stage
+    return None
+
+
+async def _try_stage(
+    session: AsyncSession,
+    conversation: Conversation,
+    stage: SalesStage,
+    rejected: dict[str, str],
+    reason: str,
+) -> bool:
+    try:
+        return await conversation_service.set_stage(session, conversation, stage, reason=reason)
+    except InvalidStateTransition as exc:
+        rejected["stage_rejected"] = str(exc)
+        return False
+
+
+async def _attach_download_link(
+    session: AsyncSession,
+    conversation: Conversation,
+    customer: Customer,
+    decision: AiDecision,
+    *,
+    link_already_sent: bool,
+    reply_text: str,
+    executed: list[str],
+    rejected: dict[str, str],
+    max_reply_characters: int,
+):
+    """Append the real, tracked download URL when the AI asked for it.
+
+    The model never writes a URL (the guardrails strip them) - the backend owns
+    the link, its token and its attribution.
+    """
+    if not decision.wants(AiAction.SEND_DOWNLOAD_LINK):
+        return reply_text, None
+
+    if customer.is_opted_out:
+        rejected["download_link_blocked"] = "customer opted out"
+        return reply_text, None
+
+    explicit_request = decision.intent in {"download_request", "buying_intent"}
+    if link_already_sent and not explicit_request:
+        # Re-sending an ignored link is the behaviour we were explicitly asked
+        # to avoid. Let the AI's words stand without another URL.
+        rejected["download_link_suppressed"] = "link already sent and not re-requested"
+        return reply_text, None
+
+    # The link is not withheld to qualify anyone. It used to be held back for a
+    # turn whenever we did not know the platform yet, which cost every customer
+    # an extra round trip before the one thing they came for. The download page
+    # works without knowing the build; when we do know it, it picks the right
+    # installer.
+    link = await download_service.create_link(
+        session,
+        customer,
+        conversation,
+        platform=download_service.normalise_platform(
+            (conversation.context_notes or {}).get("platform")
+        ),
+    )
+    suffix = f"\n\n{link.url}"
+    body = reply_text.rstrip()
+    if len(body) + len(suffix) > max_reply_characters:
+        body = body[: max_reply_characters - len(suffix)].rstrip()
+
+    executed.append("send_download_link")
+    return f"{body}{suffix}", link
+
+
+async def _apply_actions(
+    session: AsyncSession,
+    conversation: Conversation,
+    customer: Customer,
+    decision: AiDecision,
+    executed: list[str],
+    rejected: dict[str, str],
+) -> None:
+    """Run the non-messaging actions, after the reply has gone out.
+
+    Order matters: handoff and opt-out both stop the AI from sending, so they
+    are applied once the customer has already received the acknowledgement.
+    """
+    if decision.wants(AiAction.REQUEST_HUMAN_HANDOFF):
+        await conversation_service.hand_off_to_human(
+            session, conversation, reason=decision.handoff_reason or "requested by ai"
+        )
+        await reminder_service.cancel_pending(
+            session, conversation.id, resolution="human took over"
+        )
+        executed.append("request_human_handoff")
+
+    if decision.wants(AiAction.MARK_NOT_INTERESTED):
+        if await _try_stage(
+            session, conversation, SalesStage.NOT_INTERESTED, rejected, "customer not interested"
+        ):
+            executed.append("mark_not_interested")
+
+    if decision.wants(AiAction.OPT_OUT):
+        await customer_service.opt_out(session, customer, reason="requested on whatsapp")
+        await reminder_service.cancel_pending(session, conversation.id, resolution="opted out")
+        await _try_stage(
+            session, conversation, SalesStage.NOT_INTERESTED, rejected, "customer opted out"
+        )
+        executed.append("opt_out")
+
+    if decision.wants(AiAction.SCHEDULE_FOLLOW_UP) and decision.follow_up_minutes:
+        reminder = await reminder_service.schedule(
+            session,
+            conversation,
+            customer,
+            delay=timedelta(minutes=decision.follow_up_minutes),
+            reason=decision.handoff_reason or "customer asked to be contacted later",
+        )
+        if reminder is not None:
+            executed.append("schedule_follow_up")
+        else:
+            rejected["follow_up_not_scheduled"] = "stage or opt-out prevents follow-ups"
+
+
+async def _ensure_follow_up(
+    session: AsyncSession,
+    conversation: Conversation,
+    customer: Customer,
+    executed: list[str],
+) -> None:
+    """Guarantee a live conversation always has a way back.
+
+    The model asks for a follow-up far less often than it should - warm leads
+    were being lost to silence because nobody scheduled anything. Rather than
+    prompting harder, the backend queues a default check-in whenever a turn ends
+    with nothing pending. `reminder_service.schedule` already refuses opted-out
+    customers and terminal stages, and replaces any pending follow-up, so this
+    cannot stack up.
+    """
+    if "schedule_follow_up" in executed:
+        return
+    if "send_reply" not in executed:
+        # Nothing reached the customer, so there is nothing to follow up on.
+        return
+
+    reminder = await reminder_service.schedule(
+        session,
+        conversation,
+        customer,
+        delay=timedelta(hours=get_settings().default_follow_up_hours),
+        reason="automatic check-in - no reply expected yet",
+    )
+    if reminder is not None:
+        executed.append("auto_follow_up")
+
+
+# --------------------------------------------------------------------------- #
+# Flow 2: lead ads
+# --------------------------------------------------------------------------- #
+async def handle_leadgen(event: LeadgenEvent, client: MetaClient | None = None) -> None:
+    """Fetch a lead-ad submission and open the conversation with a template.
+
+    We cannot send a free-form message to someone who has never messaged us -
+    that is what Meta's template requirement is for - so the first contact is
+    always an approved template, and the AI conversation starts at their reply.
+    """
+    client = client or get_meta_client()
+    settings = get_settings()
+
+    details = await client.fetch_lead(event.leadgen_id)
+
+    async with session_scope() as session:
+        lead, customer, created = await lead_service.create_from_lead_ad(
+            session, details, page_id=event.page_id
+        )
+        if not created:
+            logger.info("leadgen already processed", extra={"leadgen_id": event.leadgen_id})
+            return
+
+        conversation, _ = await conversation_service.get_or_create_open_conversation(
+            session, customer, lead_id=lead.id
+        )
+        conversation_id = conversation.id
+        customer_id = customer.id
+        lead_id = lead.id
+        first_name = (customer.full_name or "there").split()[0]
+
+    async with session_scope() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        customer = await session.get(Customer, customer_id)
+        lead = await session.get(Lead, lead_id)
+        if conversation is None or customer is None:  # pragma: no cover - defensive
+            return
+
+        outcome = await messaging.send_template(
+            session,
+            conversation,
+            customer,
+            template_name=settings.whatsapp_lead_template_name,
+            language=settings.whatsapp_lead_template_language,
+            body_parameters=[first_name],
+            preview_text=(
+                f"Hi {first_name}, thanks for your interest in Boomshare! "
+                "Happy to answer any questions - what made you look into it?"
+            ),
+            client=client,
+        )
+
+        if not outcome.sent:
+            await lead_service.set_status(session, lead, LeadStatus.UNREACHABLE)
+            raise RetryableError(f"lead template send failed: {outcome.reason}")
+
+        await conversation_service.set_stage(
+            session, conversation, SalesStage.CONTACTED, reason="lead ad template sent"
+        )
+        await lead_service.set_status(session, lead, LeadStatus.CONTACTED)
+
+        # If they never reply, try once more rather than losing the lead.
+        await reminder_service.schedule(
+            session,
+            conversation,
+            customer,
+            delay=timedelta(hours=24),
+            kind=ReminderKind.NO_REPLY_NUDGE,
+            reason="no reply to lead ad outreach",
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Delivery receipts
+# --------------------------------------------------------------------------- #
+async def handle_message_status(event: MessageStatusEvent) -> None:
+    async with session_scope() as session:
+        await conversation_service.apply_delivery_status(
+            session, event.provider_message_id, event.status, event.errors
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Follow-ups
+# --------------------------------------------------------------------------- #
+async def send_follow_up(reminder_id: uuid.UUID, client: MetaClient | None = None) -> None:
+    """Send a due follow-up, re-checking that it is still appropriate.
+
+    The relevance check happens here, at send time, against live state - not at
+    schedule time.
+    """
+    settings = get_settings()
+
+    async with session_scope() as session:
+        reminder = await reminder_service.claim(session, reminder_id)
+        if reminder is None:
+            logger.info("reminder already claimed", extra={"reminder_id": str(reminder_id)})
+            return
+
+        conversation = await session.get(Conversation, reminder.conversation_id)
+        customer = await session.get(Customer, reminder.customer_id)
+        if conversation is None or customer is None:  # pragma: no cover - defensive
+            await reminder_service.resolve(
+                session, reminder, ReminderStatus.CANCELLED, "conversation missing"
+            )
+            return
+
+        block = reminder_service.relevance_block(reminder, conversation, customer)
+        if block is not None:
+            logger.info(
+                "follow-up skipped",
+                extra={"reminder_id": str(reminder_id), "reason": block},
+            )
+            await reminder_service.resolve(session, reminder, ReminderStatus.CANCELLED, block)
+            return
+
+        in_window = conversation_service.within_service_window(conversation)
+        history = await conversation_service.load_history(session, conversation.id)
+        link_sent = await download_service.has_link_been_sent(session, customer.id)
+
+        if in_window:
+            # Still inside 24h: let the AI write something that fits the thread.
+            result = await agent.generate_reply(
+                conversation,
+                customer,
+                history,
+                download_link_sent=link_sent,
+                within_service_window=True,
+                directive=(
+                    "Write a short, low-pressure follow-up. The customer has not replied "
+                    "since your last message. Do not repeat your previous message, do not "
+                    "apologise for following up, and do not push the download link."
+                ),
+            )
+            if result is None or not result.usable:
+                raise RetryableError("ai could not produce a follow-up")
+
+            await _apply_decision(
+                session,
+                conversation,
+                customer,
+                result,
+                inbound_message_id=None,
+                link_already_sent=link_sent,
+                max_reply_characters=settings.max_reply_characters,
+            )
+            await reminder_service.resolve(session, reminder, ReminderStatus.SENT, "ai follow-up")
+            return
+
+        outcome = await messaging.send_template(
+            session,
+            conversation,
+            customer,
+            template_name=settings.whatsapp_followup_template_name,
+            language=settings.whatsapp_followup_template_language,
+            body_parameters=[(customer.full_name or "there").split()[0]],
+            preview_text="[follow-up template]",
+            client=client,
+        )
+        if not outcome.sent:
+            # The reminder is now terminal - `claim` only takes pending rows, so
+            # nothing will retry it. Raising here would produce a worker
+            # traceback for work that is already finished with, and would hide
+            # the real cause (usually an unapproved template) behind a stack.
+            # The failure is on the reminder row and on the message row.
+            await reminder_service.resolve(
+                session, reminder, ReminderStatus.FAILED, outcome.reason or "send failed"
+            )
+            logger.error(
+                "follow-up could not be sent",
+                extra={
+                    "reminder_id": str(reminder_id),
+                    "conversation_id": str(conversation.id),
+                    "reason": outcome.reason,
+                },
+            )
+            return
+
+        await reminder_service.resolve(session, reminder, ReminderStatus.SENT, "template follow-up")

@@ -1,0 +1,8 @@
+# Normalise line endings: the repo stores LF, the image runs on Linux.
+* text=auto eol=lf
+
+# Binary assets - never touch
+*.pdf binary
+*.png binary
+*.jpg binary
+*.ico binary

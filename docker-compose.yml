@@ -1,0 +1,79 @@
+# Local development stack: PostgreSQL, Redis, the API and the worker.
+#
+#   docker compose up --build
+#   docker compose exec api alembic upgrade head
+#
+# `api` and `worker` are the same image with different commands - one process
+# serves HTTP, the other drains the job queue and runs the scheduler sweeps.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: boomshare
+      POSTGRES_PASSWORD: boomshare
+      POSTGRES_DB: boomshare
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U boomshare -d boomshare"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # Mirrors the 30MB production tier so local behaviour matches: keys are
+    # evicted under pressure, which the application is designed to tolerate.
+    command: >
+      redis-server
+      --maxmemory 30mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://boomshare:boomshare@postgres:5432/boomshare
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    build: .
+    env_file: .env
+    # The worker does not serve HTTP; do not inherit the API image healthcheck.
+    healthcheck:
+      disable: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://boomshare:boomshare@postgres:5432/boomshare
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    command: python -m app.worker.runner
+
+volumes:
+  postgres_data:

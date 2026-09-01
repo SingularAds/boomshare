@@ -1,0 +1,51 @@
+[project]
+name = "boomshare-ai-backend"
+version = "1.0.0"
+description = "WhatsApp AI sales platform for Boomshare: Meta webhooks, OpenAI sales agent, follow-ups."
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+# Alembic writes these; they are not hand-maintained code.
+extend-exclude = ["migrations"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+    "B008",    # FastAPI's Depends() in argument defaults is the documented pattern
+    "SIM102",  # a nested if is often clearer than one compound condition
+    "SIM105",  # try/except/pass reads fine; contextlib.suppress is not always clearer
+    "SIM108",  # an if/else block is often clearer than a packed ternary
+]
+
+[tool.ruff.lint.isort]
+# The codebase groups several aliased imports from one module into one statement.
+combine-as-imports = true
+
+[tool.ruff.lint.per-file-ignores]
+# Test and sandbox modules set os.environ before importing app code (the settings
+# cache reads it once), so imports are deliberately not at the top of the file.
+"tests/**" = ["E402", "E501", "B017"]
+"scripts/**" = ["E402", "E501"]
+
+[tool.coverage.run]
+source = ["app"]
+# SQLAlchemy's asyncio layer runs application code inside greenlets; without
+# this, coverage silently reports those lines as unexecuted.
+concurrency = ["greenlet", "thread"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

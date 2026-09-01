@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Check for dependency conflicts
+        run: pip check
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Tests
+        # The suite runs the whole app in-process against SQLite + fakeredis,
+        # so no Postgres/Redis services are needed here.
+        run: pytest -q
+
+      - name: End-to-end smoke
+        # Real uvicorn + real worker + real Alembic migrations, only the
+        # network boundary (Meta, OpenAI) is stubbed. Catches schema drift the
+        # unit suite misses, since that runs create_all() rather than migrations.
+        # It drives two real timer-based recovery paths, so under a loaded
+        # runner a step can occasionally time out; one retry absorbs that
+        # without masking a real regression (which fails both runs).
+        run: python scripts/e2e_smoke.py || python scripts/e2e_smoke.py
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build -t boomshare-ai-backend:ci .
+
+      - name: Boot the image and check liveness
+        run: |
+          docker run -d --name boomshare-ci -p 8000:8000 \
+            -e ENVIRONMENT=staging \
+            -e META_APP_SECRET=ci -e META_VERIFY_TOKEN=ci -e META_ACCESS_TOKEN=ci \
+            -e WHATSAPP_PHONE_NUMBER_ID=ci -e OPENAI_API_KEY=ci -e INTERNAL_API_TOKEN=ci \
+            boomshare-ai-backend:ci
+          for i in $(seq 1 15); do
+            curl -fsS http://localhost:8000/health && break || sleep 1
+          done
+          curl -fsS http://localhost:8000/health
+          docker rm -f boomshare-ci
