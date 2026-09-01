@@ -29,9 +29,14 @@ RUN useradd --create-home --uid 10001 boomshare \
     && chown -R boomshare:boomshare /app
 USER boomshare
 
+# Cloud Run (and App Engine) inject PORT and expect the container to listen on
+# it; everywhere else this default holds. Uvicorn binds $PORT at start.
+ENV PORT=8000
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS http://localhost:8000/health || exit 1
+    CMD curl -fsS "http://localhost:${PORT}/health" || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# `exec` so uvicorn is PID 1 and receives SIGTERM directly for a clean shutdown.
+# --proxy-headers: the platform terminates TLS and forwards X-Forwarded-*.
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips=*"]

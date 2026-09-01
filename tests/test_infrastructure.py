@@ -256,6 +256,65 @@ class TestWorkerLoop:
         assert await sweep_stuck_webhooks() == 0
 
 
+class TestWorkerHealthListener:
+    """The worker serves no API, but Cloud Run needs every container to answer a
+    probe on $PORT or the revision never goes live."""
+
+    async def test_liveness_readiness_and_unknown_paths(self, redis, session_factory):
+        import httpx
+
+        from app.worker import health
+
+        server = await asyncio.start_server(health._handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
+                live = await http.get("/health")
+                assert live.status_code == 200
+                assert live.json()["role"] == "worker"
+
+                ready = await http.get("/health/ready")
+                assert ready.status_code == 200
+                assert ready.json()["database"] == "ok"
+
+                missing = await http.get("/something-else")
+                assert missing.status_code == 404
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_readiness_is_503_when_the_database_is_gone(self, redis, monkeypatch):
+        import httpx
+
+        from app.worker import health
+
+        def boom():
+            raise RuntimeError("no database")
+
+        monkeypatch.setattr("app.core.db.session_scope", boom)
+
+        server = await asyncio.start_server(health._handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
+                ready = await http.get("/health/ready")
+            assert ready.status_code == 503
+            assert ready.json()["status"] == "unavailable"
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_serve_health_starts_and_stops_cleanly(self):
+        from app.worker.health import serve_health
+
+        stop = asyncio.Event()
+        task = asyncio.create_task(serve_health(stop, port=0))
+        await asyncio.sleep(0.1)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+        assert task.done() and task.exception() is None
+
+
 class FakeOpenAiResponse:
     def __init__(self, content: str):
         self.choices = [SimpleNamespace(message=SimpleNamespace(content=content))]

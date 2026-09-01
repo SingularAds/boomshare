@@ -12,6 +12,12 @@ from typing import Literal
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# The local-development defaults. A staging / production boot that still carries
+# either of these has not been given real infrastructure - fail fast rather than
+# quietly connecting to a database that is not there.
+_DEFAULT_DATABASE_URL = "postgresql+asyncpg://boomshare:boomshare@localhost:5432/boomshare"
+_DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -28,12 +34,12 @@ class Settings(BaseSettings):
     log_json: bool = True
 
     # ---- datastores ------------------------------------------------------
-    database_url: str = "postgresql+asyncpg://boomshare:boomshare@localhost:5432/boomshare"
+    database_url: str = _DEFAULT_DATABASE_URL
     db_pool_size: int = 10
     db_max_overflow: int = 5
     db_echo: bool = False
 
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = _DEFAULT_REDIS_URL
     # The MVP runs on a 30MB Redis tier: everything we put there gets a TTL.
     redis_default_ttl_seconds: int = 3600
 
@@ -117,9 +123,13 @@ class Settings(BaseSettings):
             "INTERNAL_API_TOKEN": self.internal_api_token.get_secret_value(),
         }
         missing = sorted(name for name, value in required.items() if not value)
+        if self.database_url == _DEFAULT_DATABASE_URL:
+            missing.append("DATABASE_URL")
+        if self.redis_url == _DEFAULT_REDIS_URL:
+            missing.append("REDIS_URL")
         if missing:
             raise ValueError(
-                f"ENVIRONMENT={self.environment} but these are not set: {', '.join(missing)}"
+                f"ENVIRONMENT={self.environment} but these are not set: {', '.join(sorted(missing))}"
             )
         return self
 

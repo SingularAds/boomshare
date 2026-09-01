@@ -52,14 +52,20 @@ jobs:
         run: docker build -t boomshare-ai-backend:ci .
 
       - name: Boot the image and check liveness
+        # Full staging-shaped env so the production config guard is exercised
+        # too. The datastore URLs are unreachable here on purpose - liveness
+        # (/health) checks nothing external, so it still answers 200.
         run: |
-          docker run -d --name boomshare-ci -p 8000:8000 \
+          docker run -d --name boomshare-ci -e PORT=8000 -p 8000:8000 \
             -e ENVIRONMENT=staging \
             -e META_APP_SECRET=ci -e META_VERIFY_TOKEN=ci -e META_ACCESS_TOKEN=ci \
             -e WHATSAPP_PHONE_NUMBER_ID=ci -e OPENAI_API_KEY=ci -e INTERNAL_API_TOKEN=ci \
+            -e DATABASE_URL='postgresql+asyncpg://ci:ci@127.0.0.1:5432/ci' \
+            -e REDIS_URL='redis://127.0.0.1:6379/0' \
             boomshare-ai-backend:ci
           for i in $(seq 1 15); do
             curl -fsS http://localhost:8000/health && break || sleep 1
           done
           curl -fsS http://localhost:8000/health
+          docker logs boomshare-ci
           docker rm -f boomshare-ci

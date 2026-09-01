@@ -1,6 +1,6 @@
 """The background worker process.
 
-Two coroutines run side by side:
+Three coroutines run side by side:
 
   * **consumer** - blocks on the Redis queue and runs jobs as they arrive. This
     is the fast path: a webhook stored by the API is usually processed within
@@ -9,6 +9,9 @@ Two coroutines run side by side:
     due and (b) webhook events that were stored but never finished, because
     Redis was down when the API tried to enqueue them or a worker died
     mid-job.
+  * **health listener** - answers the orchestrator's probe on ``$PORT``. The
+    worker serves no API, but Cloud Run and friends need every container to
+    listen somewhere. See ``app/worker/health.py``.
 
 The scheduler is what makes the queue disposable. If Redis were flushed right
 now, nothing would be lost - only delayed by one sweep interval.
@@ -28,6 +31,7 @@ from app.core.redis import close_redis
 from app.core.trace import guard_production as guard_trace_in_production
 from app.services import reminders as reminder_service, webhook_events
 from app.worker import queue
+from app.worker.health import serve_health
 from app.worker.jobs import run_job
 
 logger = get_logger(__name__)
@@ -35,9 +39,15 @@ logger = get_logger(__name__)
 
 async def consume(stop: asyncio.Event) -> None:
     settings = get_settings()
+    poll = int(settings.worker_poll_interval_seconds) or 1
     while not stop.is_set():
-        job = await queue.dequeue(timeout_seconds=int(settings.worker_poll_interval_seconds) or 1)
+        job = await queue.dequeue(timeout_seconds=poll)
         if job is None:
+            # A healthy BRPOP already blocked for `poll` seconds. When Redis is
+            # unreachable, dequeue returns immediately - so pause here, or the
+            # loop spins and floods the log for the length of the outage. The
+            # scheduler sweep still recovers the work.
+            await asyncio.sleep(poll)
             continue
         try:
             await run_job(job)
@@ -98,7 +108,9 @@ async def main() -> None:
             signal.signal(sig, lambda *_: stop.set())
 
     try:
-        await asyncio.gather(consume(stop), schedule(stop))
+        # serve_health answers the platform's probe on $PORT; without it a
+        # Cloud Run worker revision never goes live.
+        await asyncio.gather(consume(stop), schedule(stop), serve_health(stop))
     finally:
         await close_redis()
         await dispose_engine()
