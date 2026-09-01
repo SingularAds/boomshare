@@ -2,7 +2,7 @@
 
 A WhatsApp AI sales platform. Meta ads bring people in, an OpenAI sales agent
 has real conversation with them, and the application drives them toward
-installing the Boomshare desktop app — while keeping every business decision in
+installing the Boomshare desktop app — while keeping every businesses decision in
 PostgreSQL rather than in the model's head.
 
 - **Docs:** [Architecture](docs/architecture.md) · [Code blueprint](docs/code-blueprint.md) · [Local sandbox](docs/local-sandbox.md) · [Meta setup](docs/meta-setup.md) · [Testing guide](docs/testing-guide.md) · [Operations](docs/operations.md)
