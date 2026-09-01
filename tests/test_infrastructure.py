@@ -315,6 +315,30 @@ class TestWorkerHealthListener:
         assert task.done() and task.exception() is None
 
 
+class TestEmbeddedWorker:
+    """FastAPI lifespan can run the queue consumer and scheduler in-process."""
+
+    async def test_lifespan_starts_and_stops_embedded_worker(self, monkeypatch, redis, session_factory):
+        from app.core.config import Settings
+        from app.main import create_app
+
+        custom_settings = Settings(
+            environment="local",
+            run_embedded_worker=True,
+            database_url="sqlite+aiosqlite:///:memory:",
+            redis_url="redis://localhost:6379/15",
+            scheduler_interval_seconds=60,
+        )
+        monkeypatch.setattr("app.main.get_settings", lambda: custom_settings)
+
+        app = create_app()
+        async with app.router.lifespan_context(app):
+            # Lifespan started worker tasks
+            await asyncio.sleep(0.05)
+        # Lifespan exited and drained cleanly
+
+
+
 class FakeOpenAiResponse:
     def __init__(self, content: str):
         self.choices = [SimpleNamespace(message=SimpleNamespace(content=content))]

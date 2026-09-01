@@ -49,6 +49,7 @@ os.environ.update(
         "DOWNLOAD_BASE_URL": "https://boomshare.ai/download",
         "LOG_LEVEL": "WARNING",
         "LOG_JSON": "false",
+        "RUN_EMBEDDED_WORKER": "false",
         "SCHEDULER_INTERVAL_SECONDS": "1",
         "WEBHOOK_SWEEP_AFTER_SECONDS": "2",
     }

@@ -86,6 +86,7 @@ class Settings(BaseSettings):
     default_follow_up_hours: float = 20.0
 
     # ---- worker ----------------------------------------------------------
+    run_embedded_worker: bool = True
     worker_queue_name: str = "boomshare:jobs"
     worker_poll_interval_seconds: float = 1.0
     worker_batch_size: int = 20

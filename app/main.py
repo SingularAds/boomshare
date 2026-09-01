@@ -14,6 +14,7 @@ A modular monolith: one process, one deployment, clear internal seams.
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -40,9 +41,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.log_level, settings.log_json)
     guard_trace_in_production()
     logger.info("api starting", extra={"environment": settings.environment})
+
+    stop_event = asyncio.Event()
+    worker_tasks: list[asyncio.Task[None]] = []
+
+    if settings.run_embedded_worker and not settings.is_test:
+        from app.worker.runner import consume, schedule
+
+        logger.info("starting embedded worker tasks", extra={"queue": settings.worker_queue_name})
+        worker_tasks = [
+            asyncio.create_task(consume(stop_event)),
+            asyncio.create_task(schedule(stop_event)),
+        ]
+
     try:
         yield
     finally:
+        if worker_tasks:
+            logger.info("stopping embedded worker tasks")
+            stop_event.set()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*worker_tasks, return_exceptions=True),
+                    timeout=5.0,
+                )
+            except TimeoutError:
+                for task in worker_tasks:
+                    task.cancel()
         await get_meta_client().aclose()
         await close_redis()
         await dispose_engine()
