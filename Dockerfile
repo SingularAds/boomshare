@@ -37,6 +37,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS "http://localhost:${PORT}/health" || exit 1
 
-# `exec` so uvicorn is PID 1 and receives SIGTERM directly for a clean shutdown.
-# --proxy-headers: the platform terminates TLS and forwards X-Forwarded-*.
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips=*"]
+# Run migrations automatically before starting uvicorn.
+# `exec` so uvicorn replaces the shell as PID 1 and receives SIGTERM directly.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips=*"]
