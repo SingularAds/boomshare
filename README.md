@@ -1,7 +1,7 @@
 # Boomshare AI Backend
 
 A WhatsApp AI sales platform. Meta ads bring people in, an OpenAI sales agent
-has a real conversation with them, and the application drives them toward
+has real conversation with them, and the application drives them toward
 installing the Boomshare desktop app — while keeping every business decision in
 PostgreSQL rather than in the model's head.
 
