@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.clock import utcnow
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.domain import SalesStage, normalise_platform  # noqa: F401  (re-exported as this module's API)
+from app.domain import SalesStage
 from app.models import Conversation, Customer, DownloadLink
 from app.services import conversations as conversation_service, customers as customer_service
 
@@ -153,10 +153,13 @@ async def register_activation(
 async def _advance_stage(
     session: AsyncSession, customer: Customer, stage: SalesStage
 ) -> None:
-    """Move the customer's open conversation to a verified system stage."""
-    conversation = await conversation_service.get_open_conversation(session, customer.id)
-    if conversation is None:
-        return
-    await conversation_service.set_stage(
-        session, conversation, stage, system=True, reason="confirmed by boomshare backend"
-    )
+    """Move the customer's open conversations to a verified system stage.
+
+    Installing is a fact about the person, not about one thread. A customer who
+    wrote to two of our numbers has two open conversations, and both should
+    stop selling - not whichever one a query happened to return first.
+    """
+    for conversation in await conversation_service.open_conversations(session, customer.id):
+        await conversation_service.set_stage(
+            session, conversation, stage, system=True, reason="confirmed by boomshare backend"
+        )

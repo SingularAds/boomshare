@@ -64,7 +64,7 @@ _env = {
     "META_VERIFY_TOKEN": "sandbox-verify-token",
     "META_ACCESS_TOKEN": "sandbox-access-token",
     "META_GRAPH_BASE_URL": f"http://127.0.0.1:{ARGS.meta_port}",
-    "WHATSAPP_PHONE_NUMBER_ID": "111222333",
+    "WHATSAPP_PHONE_NUMBER_IDS": '["111222333", "444555666"]',
     "INTERNAL_API_TOKEN": "sandbox-internal-token",
     "DOWNLOAD_BASE_URL": "https://boomshare.ai/download",
     "LOG_LEVEL": "WARNING",
@@ -517,7 +517,7 @@ async def cmd_events() -> None:
 async def cmd_meta(http: httpx.AsyncClient) -> None:
     state = (await http.get(f"{META}/_control/state")).json()
     print(f"  {BOLD}fake Meta{RESET}")
-    print(f"  phone_number_id  {state['phone_number_id']}")
+    print(f"  phone_number_ids {', '.join(state['phone_number_ids'])}")
     print(f"  allowed to       {', '.join(state['allowed_recipients'])}")
     for name, t in state["templates"].items():
         colour = GREEN if t["status"] == "APPROVED" else RED

@@ -43,7 +43,7 @@ os.environ.update(
         "META_APP_SECRET": "smoke-app-secret",
         "META_VERIFY_TOKEN": "smoke-verify-token",
         "META_ACCESS_TOKEN": "smoke-access-token",
-        "WHATSAPP_PHONE_NUMBER_ID": "111222333",
+        "WHATSAPP_PHONE_NUMBER_IDS": '["111222333", "444555666"]',  # Brazil, USA
         "OPENAI_API_KEY": "sk-smoke",
         "INTERNAL_API_TOKEN": "smoke-internal-token",
         "DOWNLOAD_BASE_URL": "https://boomshare.ai/download",
@@ -75,6 +75,10 @@ AUTH = {"X-Internal-Token": "smoke-internal-token"}
 GREEN, RED, DIM, BOLD, RESET = "\033[32m", "\033[31m", "\033[2m", "\033[1m", "\033[0m"
 
 failures: list[str] = []
+#: The two numbers this run answers on, matching WHATSAPP_PHONE_NUMBER_IDS.
+PRIMARY_NUMBER = "111222333"
+SECOND_NUMBER = "444555666"
+
 whatsapp_outbox: list[dict] = []
 openai_script: list[dict] = []
 
@@ -108,7 +112,9 @@ def script_reply(**decision) -> None:
         "suggested_stage": None,
         "actions": [],
         "follow_up_minutes": None,
+        "follow_up_reason": None,
         "handoff_reason": None,
+        "customer_platform": "unknown",
         "confidence": 0.85,
         "customer_notes": {},
     }
@@ -123,7 +129,9 @@ def openai_handler(request: httpx.Request) -> httpx.Response:
         "suggested_stage": None,
         "actions": [],
         "follow_up_minutes": None,
+        "follow_up_reason": None,
         "handoff_reason": None,
+        "customer_platform": "unknown",
         "confidence": 0.5,
         "customer_notes": {},
     }
@@ -151,7 +159,12 @@ def whatsapp_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"success": True})
 
     message_id = f"wamid.OUT{len(whatsapp_outbox) + 1:04d}"
-    whatsapp_outbox.append({**body, "_id": message_id})
+    # The sending number is in the URL, not the body: /{version}/{id}/messages.
+    # Capturing it is what lets the run assert a reply left from the number
+    # the customer actually wrote to.
+    whatsapp_outbox.append(
+        {**body, "_id": message_id, "_from": str(request.url).rsplit("/", 2)[-2]}
+    )
 
     kind = body.get("type")
     if kind == "text":
@@ -224,7 +237,14 @@ def signed_post(client: httpx.AsyncClient, payload: dict):
     )
 
 
-def inbound(text: str, wa_id="919876543210", name="Priya", message_id=None, referral=None) -> dict:
+def inbound(
+    text: str,
+    wa_id="919876543210",
+    name="Priya",
+    message_id=None,
+    referral=None,
+    phone_number_id=PRIMARY_NUMBER,
+) -> dict:
     message = {
         "from": wa_id,
         "id": message_id or f"wamid.IN{uuid.uuid4().hex[:12].upper()}",
@@ -244,7 +264,7 @@ def inbound(text: str, wa_id="919876543210", name="Priya", message_id=None, refe
                         "field": "messages",
                         "value": {
                             "messaging_product": "whatsapp",
-                            "metadata": {"phone_number_id": "111222333"},
+                            "metadata": {"phone_number_id": phone_number_id},
                             "contacts": [{"profile": {"name": name}, "wa_id": wa_id}],
                             "messages": [message],
                         },
@@ -884,6 +904,300 @@ async def run_journey() -> None:
         check("the reminder is resolved as sent", delivered.status == "sent")
         if len(whatsapp_outbox) > sent_before:
             note(f"callback sent: {whatsapp_outbox[-1]['text']['body'][:100]}")
+
+        # ------------------------------------------------------------------ #
+        step("21. A second WhatsApp number, on the same webhook")
+        usa_customer = "15551234567"
+        script_reply(
+            reply_text="Hey! Boomshare records your screen so you can send a link instead.",
+            intent="greeting",
+            suggested_stage="engaged",
+        )
+        await signed_post(
+            http,
+            inbound("hi there", wa_id=usa_customer, name="Dana", phone_number_id=SECOND_NUMBER),
+        )
+        await drain()
+
+        check("the new number's message was answered", whatsapp_outbox[-1]["to"] == usa_customer)
+        check("the reply left from the number they wrote to",
+              whatsapp_outbox[-1]["_from"] == SECOND_NUMBER,
+              f"sent from {whatsapp_outbox[-1]['_from']}")
+
+        async with session_scope() as session:
+            usa_row = (
+                await session.execute(
+                    select(Conversation)
+                    .join(Customer, Customer.id == Conversation.customer_id)
+                    .where(Customer.wa_id == usa_customer)
+                )
+            ).scalar_one()
+        check("the conversation remembers its number", usa_row.phone_number_id == SECOND_NUMBER)
+
+        # The original number must be unaffected by the new one existing.
+        script_reply(reply_text="Of course - what would you record first?",
+                     intent="information_request")
+        await signed_post(http, inbound("one more question", wa_id=buyer))
+        await drain()
+        check("the original number still answers as itself",
+              whatsapp_outbox[-1]["_from"] == PRIMARY_NUMBER,
+              f"sent from {whatsapp_outbox[-1]['_from']}")
+
+        # ------------------------------------------------------------------ #
+        step("22. A follow-up days later still knows which number to use")
+        async with session_scope() as session:
+            queued = (
+                await session.execute(
+                    select(Reminder).where(
+                        Reminder.conversation_id == usa_row.id, Reminder.status == "pending"
+                    )
+                )
+            ).scalar_one()
+            queued.due_at = utcnow() - timedelta(seconds=1)
+
+        script_reply(reply_text="Still keen to give it a try?", intent="small_talk")
+        sent_before = len(whatsapp_outbox)
+        deadline = asyncio.get_running_loop().time() + 20
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            if len(whatsapp_outbox) > sent_before:
+                break
+
+        check("the follow-up went out", len(whatsapp_outbox) > sent_before)
+        if len(whatsapp_outbox) > sent_before:
+            check("it used the conversation's number, not the default",
+                  whatsapp_outbox[-1]["_from"] == SECOND_NUMBER,
+                  f"sent from {whatsapp_outbox[-1]['_from']}")
+            note(f"follow-up sent from {whatsapp_outbox[-1]['_from']}")
+
+        # ------------------------------------------------------------------ #
+        step("23. A number we do not own is stored but never answered")
+        sent_before = len(whatsapp_outbox)
+        await signed_post(
+            http,
+            inbound("hello?", wa_id="4915112345678", name="Jonas", phone_number_id="999999999"),
+        )
+        await drain()
+
+        async with session_scope() as session:
+            stranger = (
+                await session.execute(select(Customer).where(Customer.wa_id == "4915112345678"))
+            ).scalar_one_or_none()
+
+        check("nothing was sent back", len(whatsapp_outbox) == sent_before)
+        check("their message was still stored, not dropped", stranger is not None)
+
+        # ------------------------------------------------------------------ #
+        step("24. A customer on a phone is not handed a desktop installer")
+        phone_user = "919000033333"
+        script_reply(
+            reply_text="Boomshare records your screen. What would you use it for?",
+            intent="greeting",
+            suggested_stage="engaged",
+        )
+        await signed_post(http, inbound("hello", wa_id=phone_user, name="Amit"))
+        await drain()
+
+        script_reply(
+            reply_text=(
+                "There's no mobile app right now - it's Windows and Mac, with Linux "
+                "coming soon. Do you have a laptop you could use?"
+            ),
+            intent="download_request",
+            actions=["send_download_link"],
+            customer_platform="other",
+        )
+        await signed_post(http, inbound("Yes in mobile", wa_id=phone_user))
+        await drain()
+
+        check("the explanation still went out",
+              "no mobile app" in whatsapp_outbox[-1].get("text", {}).get("body", ""))
+        check("no installer was attached to it",
+              "http" not in whatsapp_outbox[-1].get("text", {}).get("body", ""))
+
+        async with session_scope() as session:
+            phone_customer = (
+                await session.execute(select(Customer).where(Customer.wa_id == phone_user))
+            ).scalar_one()
+            links = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(DownloadLink)
+                    .where(DownloadLink.customer_id == phone_customer.id)
+                )
+            ).scalar()
+        check("no download link was even created", links == 0, f"{links} link(s)")
+
+        # ------------------------------------------------------------------ #
+        step("25. The promised callback says something new")
+        script_reply(
+            reply_text="Perfect - I'll check back with you in 4 minutes.",
+            intent="information_request",
+            actions=["schedule_follow_up"],
+            follow_up_minutes=4,
+            follow_up_reason="they said they would be at their laptop in 4 minutes",
+        )
+        await signed_post(
+            http, inbound("Ok I am coming with laptop in 4 minutes", wa_id=phone_user)
+        )
+        await drain()
+        promise_text = whatsapp_outbox[-1]["text"]["body"]
+
+        async with session_scope() as session:
+            phone_conversation = (
+                await session.execute(
+                    select(Conversation).where(Conversation.customer_id == phone_customer.id)
+                )
+            ).scalar_one()
+            callback = (
+                await session.execute(
+                    select(Reminder).where(
+                        Reminder.conversation_id == phone_conversation.id,
+                        Reminder.status == "pending",
+                    )
+                )
+            ).scalar_one()
+
+        check("the callback remembers what it is about",
+              (callback.payload or {}).get("promise") is not None,
+              f"payload={callback.payload}")
+
+        async with session_scope() as session:
+            row = await session.get(Reminder, callback.id)
+            row.due_at = utcnow() - timedelta(seconds=1)
+
+        script_reply(
+            reply_text="Are you at your laptop now? Happy to walk you through the first recording.",
+            intent="small_talk",
+        )
+        sent_before = len(whatsapp_outbox)
+        deadline = asyncio.get_running_loop().time() + 20
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            if len(whatsapp_outbox) > sent_before:
+                break
+
+        check("the callback arrived", len(whatsapp_outbox) > sent_before)
+        if len(whatsapp_outbox) > sent_before:
+            follow_up_text = whatsapp_outbox[-1]["text"]["body"]
+            check("it did not repeat the promise word for word",
+                  follow_up_text != promise_text)
+            note(f"promised : {promise_text}")
+            note(f"followed : {follow_up_text}")
+
+        # The send happens partway through the decision, which then goes on to
+        # write its log row and queue the next check-in. Moving to the next step
+        # the instant the message appears races that tail: the scripted reply
+        # for step 26 could be consumed by work still finishing here. Wait for
+        # the reminder to actually reach a terminal state first.
+        deadline = asyncio.get_running_loop().time() + 15
+        while asyncio.get_running_loop().time() < deadline:
+            async with session_scope() as session:
+                settled = await session.get(Reminder, callback.id)
+                if settled.status in ("sent", "cancelled", "failed"):
+                    break
+            await asyncio.sleep(0.15)
+        await drain()
+
+        # ------------------------------------------------------------------ #
+        step("26. Reaching a laptop releases the download")
+        script_reply(
+            reply_text="Great - here you go. Takes about a minute to install.",
+            intent="download_request",
+            actions=["send_download_link"],
+            customer_platform="windows",
+        )
+        await signed_post(http, inbound("yes I am on my windows laptop now", wa_id=phone_user))
+        await drain()
+
+        body = whatsapp_outbox[-1].get("text", {}).get("body", "")
+        check("the link goes out once they can run it", "http" in body)
+        check("and it points at the Windows build", "platform=windows" in body,
+              body.rsplit("?", 1)[-1] if "?" in body else body)
+
+        # ------------------------------------------------------------------ #
+        step("27. A deferral is honoured, moved, and capped at two")
+        defer_user = "919000044444"
+        script_reply(reply_text="Boomshare records your screen. Interested?",
+                     intent="greeting", suggested_stage="engaged")
+        await signed_post(http, inbound("hello", wa_id=defer_user, name="Ravi"))
+        await drain()
+
+        async def promised_rows(status=None):
+            async with session_scope() as session:
+                rows = (
+                    await session.execute(
+                        select(Reminder)
+                        .join(Conversation, Conversation.id == Reminder.conversation_id)
+                        .join(Customer, Customer.id == Conversation.customer_id)
+                        .where(Customer.wa_id == defer_user)
+                    )
+                ).scalars().all()
+            return [
+                r for r in rows
+                if (r.payload or {}).get("promise") and (status is None or r.status == status)
+            ]
+
+        async def defer(minutes, nth):
+            script_reply(
+                reply_text=f"Sure - I'll check back in {minutes} minutes.",
+                intent="information_request",
+                actions=["schedule_follow_up"],
+                follow_up_minutes=minutes,
+                follow_up_reason=f"they asked for {minutes} more minutes",
+            )
+            await signed_post(
+                http, inbound(f"give me {minutes} more minutes", wa_id=defer_user)
+            )
+            await drain()
+
+        await defer(5, 1)
+        pending = await promised_rows("pending")
+        check("the deferral is stored as a callback", len(pending) == 1,
+              f"{len(pending)} pending")
+
+        # Pushing the time back must move it, not add a second one.
+        await defer(10, 2)
+        pending = await promised_rows("pending")
+        check("pushing the time back replaces it rather than adding one",
+              len(pending) == 1, f"{len(pending)} pending")
+        if pending:
+            due_in = as_utc(pending[0].due_at) - utcnow()
+            check("and it uses the new time",
+                  timedelta(minutes=9) < due_in <= timedelta(minutes=10), f"due in {due_in}")
+
+        # Fire both callbacks for real, through the scheduler.
+        for nth in (1, 2):
+            pending = await promised_rows("pending")
+            if not pending:
+                break
+            async with session_scope() as session:
+                row = await session.get(Reminder, pending[0].id)
+                row.due_at = utcnow() - timedelta(seconds=1)
+            script_reply(reply_text=f"Are you at your laptop yet? ({nth})",
+                         intent="small_talk")
+            sent_before = len(whatsapp_outbox)
+            deadline = asyncio.get_running_loop().time() + 20
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.5)
+                if len(whatsapp_outbox) > sent_before:
+                    break
+            check(f"promised callback {nth} actually reached the customer",
+                  len(whatsapp_outbox) > sent_before)
+            if nth == 1:
+                await defer(10, 3)
+
+        check("exactly two promised callbacks were delivered",
+              len(await promised_rows("sent")) == 2,
+              f"{len(await promised_rows('sent'))} sent")
+
+        # A third deferral must not schedule another callback.
+        sent_before = len(whatsapp_outbox)
+        await defer(15, 4)
+        check("a third deferral schedules no further callback",
+              len(await promised_rows("pending")) == 0)
+        check("but the customer is still answered",
+              len(whatsapp_outbox) > sent_before)
 
 
 # --------------------------------------------------------------------------- #

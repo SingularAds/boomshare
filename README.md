@@ -166,7 +166,7 @@ Every setting is environment-driven and documented inline in
 | `META_APP_SECRET` | Meta App → Settings → Basic → App Secret |
 | `META_VERIFY_TOKEN` | Any string you choose; type the same one into Meta |
 | `META_ACCESS_TOKEN` | System user token with WhatsApp + leads permissions |
-| `WHATSAPP_PHONE_NUMBER_ID` | WhatsApp Manager → API Setup (the ID, not the number) |
+| `WHATSAPP_PHONE_NUMBER_IDS` | WhatsApp Manager → API Setup (the IDs, not the numbers). A JSON list, one per number you answer on; the first is the default sender |
 | `OPENAI_API_KEY` | platform.openai.com |
 | `INTERNAL_API_TOKEN` | `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
 | `DATABASE_URL` | Your PostgreSQL instance |
@@ -180,7 +180,7 @@ redaction filter. Nothing is hardcoded.
 ## Tests
 
 ```bash
-pytest                              # 356 tests, ~40s, no network
+pytest                              # 464 tests, ~40s, no network
 pytest --cov=app --cov-report=term  # ~92% coverage
 pytest tests/test_inbound_flow.py   # one area
 ```

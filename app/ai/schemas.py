@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.domain import AiAction, CustomerIntent, SalesStage
+from app.domain import AiAction, CustomerIntent, CustomerPlatform, SalesStage
 
 
 class AiDecision(BaseModel):
@@ -24,7 +24,14 @@ class AiDecision(BaseModel):
     suggested_stage: SalesStage | None = None
     actions: list[AiAction] = Field(default_factory=list)
     follow_up_minutes: int | None = None
+    # What the follow-up is *about*, in the model's own words. Without it a
+    # promised callback has nothing to honour and repeats the promise instead.
+    follow_up_reason: str | None = None
     handoff_reason: str | None = None
+    # Which machine they are on, classified by the model. Free text used to be
+    # matched against a keyword list here, which missed every phone that is not
+    # spelled "phone".
+    customer_platform: CustomerPlatform = CustomerPlatform.UNKNOWN
     confidence: float = 0.5
     # Durable facts worth remembering about the customer (role, team size,
     # current tool). Persisted on the conversation, not just in the prompt.
@@ -82,7 +89,9 @@ DECISION_JSON_SCHEMA: dict[str, Any] = {
         "suggested_stage",
         "actions",
         "follow_up_minutes",
+        "follow_up_reason",
         "handoff_reason",
+        "customer_platform",
         "confidence",
         "customer_notes",
     ],
@@ -113,7 +122,28 @@ DECISION_JSON_SCHEMA: dict[str, Any] = {
                 "type": "string",
                 "enum": [v for v in _enum_values(AiAction) if v != AiAction.NONE],
             },
-            "description": "Business actions requested from the backend. Empty for a normal turn.",
+            # Strict JSON schema has nowhere to put a description on an
+            # individual enum value, so the contract for each action lives here.
+            # It is the only place the model is told what each one *does* to the
+            # message it is writing, which is what decides whether it picks the
+            # right one.
+            "description": (
+                "Business actions requested from the backend. Empty list for an "
+                "ordinary turn. What each one does:\n"
+                "- offer_download_link: your reply ASKS whether they want the "
+                "download. Nothing is attached to this message; the offer is "
+                "recorded so the next turn can hand it over.\n"
+                "- send_download_link: they asked for the download or accepted "
+                "your offer. The backend appends the real URL to THIS message, "
+                "so word the reply as handing it over ('here you go'), never as "
+                "a question. Never request both link actions in one turn.\n"
+                "- schedule_follow_up: they want to be contacted later; set "
+                "follow_up_minutes to the time they named.\n"
+                "- request_human_handoff: they asked for a person, or the "
+                "question is beyond the product knowledge.\n"
+                "- mark_not_interested: they turned you down outright.\n"
+                "- opt_out: they asked to stop being contacted."
+            ),
         },
         "follow_up_minutes": {
             "type": ["integer", "null"],
@@ -128,9 +158,34 @@ DECISION_JSON_SCHEMA: dict[str, Any] = {
                 "'give me five minutes', 1440 for 'tomorrow'."
             ),
         },
+        "follow_up_reason": {
+            "type": ["string", "null"],
+            "description": (
+                "What you are checking back about, when schedule_follow_up is requested. "
+                "One short sentence in your own words, e.g. 'they said they would be at "
+                "their laptop in 4 minutes'. This is read back to you when the follow-up "
+                "fires, and it is the only thing that stops you repeating this message "
+                "instead of following up on it."
+            ),
+        },
         "handoff_reason": {
             "type": ["string", "null"],
             "description": "Why a human is needed, when request_human_handoff is requested.",
+        },
+        "customer_platform": {
+            "type": "string",
+            "enum": _enum_values(CustomerPlatform),
+            "description": (
+                "Which machine the customer is on, from everything they have said so "
+                "far. 'windows' or 'macos' if they are on a computer Boomshare runs "
+                "on. 'other' for anything with no build to install - a phone, a "
+                "tablet, Linux - however they phrase it: 'my cell', 'Samsung', "
+                "'celular', 'Redmi', 'iPad', 'Ubuntu' are all 'other'. 'unknown' if "
+                "it genuinely has not come up. Report it on every turn from the whole "
+                "conversation, not just the latest message, and do not guess 'other' "
+                "when you simply do not know - that withholds the download from "
+                "someone who could have installed it."
+            ),
         },
         "confidence": {
             "type": "number",

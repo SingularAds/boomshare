@@ -23,6 +23,10 @@ class SentMessage:
     body: str | None = None
     template: str | None = None
     parameters: list[str] = field(default_factory=list)
+    # Which of our numbers it went out from. Recorded because "the reply left
+    # from the number they wrote to" is the whole point of multi-number support,
+    # and it is invisible in the message body.
+    phone_number_id: str | None = None
 
 
 class FakeMetaClient:
@@ -40,11 +44,15 @@ class FakeMetaClient:
     def _next_id(self) -> str:
         return f"wamid.OUT{next(self._ids):04d}"
 
-    async def send_text(self, to: str, body: str, **_: Any) -> SendResult:
+    async def send_text(
+        self, to: str, body: str, *, phone_number_id: str | None = None, **_: Any
+    ) -> SendResult:
         if self.fail_text_with is not None:
             raise self.fail_text_with
         message_id = self._next_id()
-        self.sent.append(SentMessage(to=to, kind="text", body=body))
+        self.sent.append(
+            SentMessage(to=to, kind="text", body=body, phone_number_id=phone_number_id)
+        )
         return SendResult(provider_message_id=message_id, raw={"messages": [{"id": message_id}]})
 
     async def send_template(
@@ -53,6 +61,7 @@ class FakeMetaClient:
         template_name: str,
         language_code: str = "en",
         body_parameters: list[str] | None = None,
+        phone_number_id: str | None = None,
         **_: Any,
     ) -> SendResult:
         if self.fail_template_with is not None:
@@ -64,6 +73,7 @@ class FakeMetaClient:
                 kind="template",
                 template=template_name,
                 parameters=list(body_parameters or []),
+                phone_number_id=phone_number_id,
             )
         )
         return SendResult(provider_message_id=message_id, raw={"messages": [{"id": message_id}]})

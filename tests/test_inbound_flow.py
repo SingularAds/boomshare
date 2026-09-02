@@ -127,6 +127,56 @@ class TestClickToWhatsApp:
         await drain_queue()
         assert len(meta.read_receipts) == 1
 
+    async def test_the_read_receipt_does_not_block_the_reply(self, client, ai, meta):
+        """The blue tick runs *during* the reply, not in front of it.
+
+        Measured against the live stack, awaiting it first cost 340-1000ms
+        before any work on the answer began - a Meta round trip plus the TLS
+        handshake, because idle connections do not survive the gap between two
+        customer messages.
+
+        This is deadlock-shaped rather than timing-shaped on purpose: the fake
+        receipt refuses to finish until the reply has gone out, so if the
+        receipt were ever awaited first the test would time out instead of
+        going green on a fast machine and red on a slow one.
+        """
+        import asyncio
+
+        replied = asyncio.Event()
+        real_send = meta.send_text
+
+        async def send_text(*args, **kwargs):
+            result = await real_send(*args, **kwargs)
+            replied.set()
+            return result
+
+        async def mark_read(provider_message_id, phone_number_id=None):
+            await asyncio.wait_for(replied.wait(), timeout=5)
+            meta.read_receipts.append(provider_message_id)
+
+        meta.send_text = send_text
+        meta.mark_read = mark_read
+
+        await post_message(client, text="hi")
+        await drain_queue()
+
+        assert meta.texts, "the reply never went out"
+        assert len(meta.read_receipts) == 1, "the receipt did not finish"
+
+    async def test_a_failing_read_receipt_does_not_lose_the_reply(self, client, ai, meta):
+        """It is a courtesy. Moving it off the critical path must not make a
+        failure there able to take the customer's answer down with it."""
+
+        async def mark_read(provider_message_id, phone_number_id=None):
+            raise RuntimeError("meta said no")
+
+        meta.mark_read = mark_read
+
+        await post_message(client, text="hi")
+        await drain_queue()
+
+        assert len(meta.texts) == 1
+
     async def test_webhook_event_is_marked_processed(self, client, db, ai, meta):
         await post_message(client, text="hi")
         await drain_queue()

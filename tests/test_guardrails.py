@@ -20,7 +20,7 @@ from app.ai.guardrails import (
     validate_stage,
 )
 from app.ai.schemas import AiDecision
-from app.domain import AiAction, CustomerIntent, SalesStage
+from app.domain import AiAction, CustomerIntent, CustomerPlatform, SalesStage
 
 
 class TestUrlStripping:
@@ -165,6 +165,114 @@ class TestActionValidation:
         actions, rejected = validate_actions(decision)
         assert actions == [AiAction.OPT_OUT]
         assert "conflicting_with_opt_out" in rejected
+
+
+class TestTheModelDecidesWhenToSend:
+    """*When* to hand the download over is the model's call.
+
+    This used to be re-decided here from the reported intent, the funnel stage
+    and a regex over the reply text - three guesses at a judgement the model had
+    already made. The regex recognised one English phrasing and missed
+    "Quer que eu envie o link?", which is the language half of these
+    conversations are in. What is left enforces facts, not opinions.
+    """
+
+    @staticmethod
+    def _outcome(actions, platform=CustomerPlatform.UNKNOWN, reply="Here you go."):
+        decision = AiDecision(
+            reply_text=reply,
+            intent=CustomerIntent.INFORMATION_REQUEST,
+            actions=actions,
+            customer_platform=platform,
+        )
+        return validate_decision(decision, SalesStage.ENGAGED, 900)
+
+    def test_a_send_is_honoured_whatever_the_intent_says(self):
+        """The model asked. It has the whole conversation; the enum does not."""
+        outcome = self._outcome([AiAction.SEND_DOWNLOAD_LINK])
+        assert outcome.decision.actions == [AiAction.SEND_DOWNLOAD_LINK]
+        assert outcome.rejected == {}
+
+    def test_a_send_is_honoured_at_any_stage(self):
+        for stage in (SalesStage.NEW, SalesStage.ENGAGED, SalesStage.OBJECTION_HANDLING):
+            decision = AiDecision(
+                reply_text="Here you go.",
+                intent=CustomerIntent.SMALL_TALK,
+                actions=[AiAction.SEND_DOWNLOAD_LINK],
+            )
+            outcome = validate_decision(decision, stage, 900)
+            assert outcome.decision.actions == [AiAction.SEND_DOWNLOAD_LINK], stage
+
+    def test_an_offer_is_honoured_as_an_offer(self):
+        outcome = self._outcome([AiAction.OFFER_DOWNLOAD_LINK])
+        assert outcome.decision.actions == [AiAction.OFFER_DOWNLOAD_LINK]
+
+    def test_reply_wording_is_no_longer_second_guessed(self):
+        """A question mark is not evidence. The action is."""
+        outcome = self._outcome(
+            [AiAction.SEND_DOWNLOAD_LINK], reply="Would you like me to send you the link?"
+        )
+        assert outcome.decision.actions == [AiAction.SEND_DOWNLOAD_LINK]
+
+    def test_asking_and_sending_at_once_resolves_to_the_offer(self):
+        """Structural, not a judgement: one turn cannot be both messages."""
+        outcome = self._outcome([AiAction.OFFER_DOWNLOAD_LINK, AiAction.SEND_DOWNLOAD_LINK])
+        assert outcome.decision.actions == [AiAction.OFFER_DOWNLOAD_LINK]
+        assert "conflicting_link_actions" in outcome.rejected
+
+    def test_a_platform_with_no_build_withholds_both(self):
+        """The one fact that outranks the model's choice - and it is the model's
+        own report, not a keyword match on prose."""
+        for actions in ([AiAction.SEND_DOWNLOAD_LINK], [AiAction.OFFER_DOWNLOAD_LINK]):
+            outcome = self._outcome(actions, platform=CustomerPlatform.OTHER)
+            assert outcome.decision.actions == []
+            assert "download_withheld" in outcome.rejected
+
+    def test_an_unknown_platform_never_withholds(self):
+        outcome = self._outcome([AiAction.SEND_DOWNLOAD_LINK], platform=CustomerPlatform.UNKNOWN)
+        assert outcome.decision.actions == [AiAction.SEND_DOWNLOAD_LINK]
+
+    def test_the_reported_platform_is_remembered(self):
+        outcome = self._outcome([], platform=CustomerPlatform.MACOS)
+        assert outcome.decision.customer_notes["platform"] == "macos"
+
+    def test_unknown_does_not_erase_what_we_already_knew(self):
+        """A turn that reports "unknown" has learned nothing, not learned that
+        they are on nothing - so what we knew survives."""
+        decision = AiDecision(
+            reply_text="ok", actions=[], customer_platform=CustomerPlatform.UNKNOWN
+        )
+        outcome = validate_decision(decision, SalesStage.ENGAGED, 900, known_platform="windows")
+        assert outcome.decision.customer_notes["platform"] == "windows"
+
+    def test_nothing_known_anywhere_records_no_platform(self):
+        decision = AiDecision(
+            reply_text="ok", actions=[], customer_platform=CustomerPlatform.UNKNOWN
+        )
+        outcome = validate_decision(decision, SalesStage.ENGAGED, 900)
+        assert "platform" not in outcome.decision.customer_notes
+
+    def test_a_platform_learned_earlier_still_withholds(self):
+        decision = AiDecision(
+            reply_text="Here you go.",
+            actions=[AiAction.SEND_DOWNLOAD_LINK],
+            customer_platform=CustomerPlatform.UNKNOWN,
+        )
+        outcome = validate_decision(decision, SalesStage.ENGAGED, 900, known_platform="other")
+        assert outcome.decision.actions == []
+
+    def test_an_ordinary_turn_is_left_alone(self):
+        outcome = self._outcome([])
+        assert outcome.decision.actions == []
+
+    def test_opting_out_still_beats_both_link_actions(self):
+        decision = AiDecision(
+            reply_text="Understood, I'll stop there.",
+            intent=CustomerIntent.OPT_OUT,
+            actions=[AiAction.OFFER_DOWNLOAD_LINK, AiAction.OPT_OUT],
+        )
+        outcome = validate_decision(decision, SalesStage.ENGAGED, 900)
+        assert outcome.decision.actions == [AiAction.OPT_OUT]
 
 
 class TestFollowUpClamping:

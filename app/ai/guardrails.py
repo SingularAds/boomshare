@@ -13,6 +13,9 @@ What it enforces:
   * stage suggestions are real stages, not system-only ones, and are a legal
     transition from the current stage
   * follow-up delays are whole minutes inside sane bounds
+  * the download decision stays coherent - an offer and a delivery cannot be
+    the same turn, and an installer is never sent to a machine the model has
+    said cannot run it. *When* to send is the model's call, not this module's
 """
 
 from __future__ import annotations
@@ -25,8 +28,10 @@ from app.domain import (
     SYSTEM_ONLY_STAGES,
     AiAction,
     CustomerIntent,
+    CustomerPlatform,
     SalesStage,
     can_transition,
+    read_platform,
 )
 
 logger = get_logger(__name__)
@@ -73,6 +78,26 @@ def strip_urls(text: str) -> str:
 
 def contains_false_claim(text: str) -> bool:
     return bool(_FALSE_CLAIM_RE.search(text))
+
+
+def is_repeat(reply: str, previous: str | None) -> bool:
+    """Is this the message we just sent, said again?
+
+    Compared loosely - case, punctuation and spacing removed - because the
+    version that reaches a customer may have had a URL stripped or a sentence
+    trimmed since. Live, a promised callback arrived four minutes later as a
+    word-for-word copy of the promise itself:
+
+        agent   "Sounds good! I'll check back with you in 4 minutes..."
+        agent   "Sounds good! I'll check back with you in 4 minutes..."
+    """
+    if not reply or not previous:
+        return False
+    return _comparable(reply) == _comparable(previous)
+
+
+def _comparable(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
 def sanitise_reply(text: str, max_characters: int) -> tuple[str, dict[str, str]]:
@@ -135,7 +160,11 @@ def validate_actions(decision: AiDecision) -> tuple[list[AiAction], dict[str, st
     # Asking to opt out and to keep selling at the same time is nonsense; the
     # customer's wish to stop wins.
     if AiAction.OPT_OUT in actions:
-        conflicting = {AiAction.SEND_DOWNLOAD_LINK, AiAction.SCHEDULE_FOLLOW_UP}
+        conflicting = {
+            AiAction.SEND_DOWNLOAD_LINK,
+            AiAction.OFFER_DOWNLOAD_LINK,
+            AiAction.SCHEDULE_FOLLOW_UP,
+        }
         if conflicting & set(actions):
             rejected["conflicting_with_opt_out"] = "dropped sales actions alongside opt_out"
         actions = [a for a in actions if a not in conflicting]
@@ -172,6 +201,56 @@ def resolve_deferral(
     )
 
 
+def resolve_link_offer(
+    actions: list[AiAction],
+    *,
+    platform: CustomerPlatform,
+) -> tuple[list[AiAction], dict[str, str]]:
+    """Keep the model's decision about the download coherent - do not re-take it.
+
+    **When** to hand the download over is the model's call, and it says so by
+    choosing between two actions. This function used to overrule that from the
+    outside, using the reported intent, the funnel stage and a regex over the
+    reply text. All three were guesses about a judgement the model had already
+    made, and they were wrong in the ways guesses are: the regex recognised one
+    English phrasing and missed "Quer que eu envie o link?" - Portuguese being
+    the language half these conversations are in.
+
+    What is left is not a judgement:
+
+    * An offer and a delivery are two different messages, so one turn cannot be
+      both. This is structural, not a matter of opinion.
+    * A build the customer cannot install is a product fact. If the model has
+      itself reported they are on something we do not ship for and asks to send
+      anyway, the decision contradicts itself, and the half backed by a fact
+      wins.
+    """
+    wants_send = AiAction.SEND_DOWNLOAD_LINK in actions
+    wants_offer = AiAction.OFFER_DOWNLOAD_LINK in actions
+    if not (wants_send or wants_offer):
+        return actions, {}
+
+    without_link = [
+        action
+        for action in actions
+        if action not in {AiAction.SEND_DOWNLOAD_LINK, AiAction.OFFER_DOWNLOAD_LINK}
+    ]
+
+    if platform is CustomerPlatform.OTHER:
+        return without_link, {
+            "download_withheld": "model reported a platform with no build to install"
+        }
+
+    if wants_send and wants_offer:
+        # Asking and handing over in the same breath is the one thing the split
+        # exists to prevent. The offer is the safe half: nothing is attached.
+        return [*without_link, AiAction.OFFER_DOWNLOAD_LINK], {
+            "conflicting_link_actions": "offer and send requested together; offered"
+        }
+
+    return actions, {}
+
+
 def clamp_follow_up_minutes(minutes: float | None) -> tuple[int | None, dict[str, str]]:
     """Bring a requested delay inside the schedulable range, in whole minutes."""
     if minutes is None:
@@ -184,10 +263,24 @@ def clamp_follow_up_minutes(minutes: float | None) -> tuple[int | None, dict[str
 
 
 def validate_decision(
-    decision: AiDecision, current_stage: SalesStage, max_characters: int
+    decision: AiDecision,
+    current_stage: SalesStage,
+    max_characters: int,
+    *,
+    known_platform: str | None = None,
 ) -> ValidationOutcome:
-    """Run every check and return a decision that is safe to act on."""
+    """Run every check and return a decision that is safe to act on.
+
+    `known_platform` is what we had already learned. This turn's own note wins
+    over it, so a customer who says "mobile" is treated as being on a mobile
+    from that very message rather than from the next one.
+    """
     rejected: dict[str, str] = {}
+    # This turn's own report wins; the stored note only fills in when the model
+    # left it unknown, so a machine they named three messages ago is not lost.
+    platform = decision.customer_platform
+    if platform is CustomerPlatform.UNKNOWN:
+        platform = read_platform(known_platform)
 
     reply, reply_rejected = sanitise_reply(decision.reply_text, max_characters)
     rejected.update(reply_rejected)
@@ -201,6 +294,9 @@ def validate_decision(
     stage, actions, deferral_rejected = resolve_deferral(stage, actions)
     rejected.update(deferral_rejected)
 
+    actions, link_rejected = resolve_link_offer(actions, platform=platform)
+    rejected.update(link_rejected)
+
     minutes, minutes_rejected = clamp_follow_up_minutes(decision.follow_up_minutes)
     rejected.update(minutes_rejected)
 
@@ -210,6 +306,17 @@ def validate_decision(
         if k and v
     }
 
+    # The platform rides along in the notes so it reaches the next turn's prompt
+    # and objective through the one path that already persists them. Only a
+    # positive answer is written: a turn that reports "unknown" has not learned
+    # that they are on nothing, it has learned nothing.
+    if platform is not CustomerPlatform.UNKNOWN:
+        notes["platform"] = platform.value
+
+    # The promise is stored and later fed back into a prompt, so it gets the
+    # same treatment as anything else the model writes: no URLs, bounded length.
+    promise = strip_urls(decision.follow_up_reason or "").strip()[:200] or None
+
     safe = decision.model_copy(
         update={
             "reply_text": reply,
@@ -218,6 +325,7 @@ def validate_decision(
             "follow_up_minutes": minutes,
             "confidence": max(0.0, min(float(decision.confidence or 0.0), 1.0)),
             "customer_notes": notes,
+            "follow_up_reason": promise,
             "intent": decision.intent or CustomerIntent.UNCLEAR,
         }
     )

@@ -55,14 +55,17 @@ class TestQualificationSlots:
         assert "use_case" in missing_slots({"use_case": "   "})
 
     def test_a_platform_we_cannot_ship_to_is_still_missing(self):
-        """The model recorded `platform: "mobile"` in a live run.
+        """"They are on a phone" answers the question without making them
+        installable, so the slot stays open - there is no build to choose."""
+        assert "platform" in missing_slots({"platform": "other"})
+        assert "platform" not in missing_slots({"platform": "macos"})
+        assert "platform" not in missing_slots({"platform": "windows"})
 
-        That answers the question without making them installable. Counting it
-        as known would release a desktop link to someone holding a phone.
-        """
+    def test_free_text_left_by_an_older_turn_counts_as_unknown(self):
+        """Notes written before the model reported this field hold prose. It is
+        read as "not known", never as "cannot run it"."""
         assert "platform" in missing_slots({"platform": "mobile"})
-        assert "platform" in missing_slots({"platform": "linux"})
-        assert "platform" not in missing_slots({"platform": "Mac"})
+        assert "platform" in missing_slots({"platform": "Samsung Galaxy"})
 
 
 class TestTheLadderLeadsWithValue:
@@ -123,14 +126,14 @@ class TestTheLadderCloses:
         assert "same message" in objective
 
     def test_a_known_platform_releases_the_link(self):
-        objective = next_objective(SalesStage.DOWNLOAD_SUGGESTED, {"platform": "Mac"})
+        objective = next_objective(SalesStage.DOWNLOAD_SUGGESTED, {"platform": "macos"})
         assert "send_download_link" in objective
 
     def test_an_unshippable_platform_does_not_release_the_link(self):
         """Speed is not an excuse to send a desktop installer to a phone."""
-        objective = next_objective(SalesStage.DOWNLOAD_SUGGESTED, {"platform": "mobile"})
-        assert "send_download_link" not in objective
+        objective = next_objective(SalesStage.DOWNLOAD_SUGGESTED, {"platform": "other"})
         assert "schedule_follow_up" in objective
+        assert "does not ship for" in objective
 
     def test_after_the_link_it_stops_selling(self):
         objective = next_objective(SalesStage.ENGAGED, {}, download_link_sent=True)

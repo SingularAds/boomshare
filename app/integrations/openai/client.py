@@ -11,11 +11,13 @@ import json
 import time
 from typing import Any, Protocol, runtime_checkable
 
+import httpx
 from openai import (
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
+    DefaultAsyncHttpxClient,
     RateLimitError,
 )
 from pydantic import ValidationError
@@ -51,6 +53,17 @@ class OpenAiSalesModel:
                 # The SDK's own retry handles connection blips and 429s with
                 # backoff; we do not add a second retry layer on top.
                 max_retries=self.settings.openai_max_retries,
+                # The SDK's own client subclass, so every default it sets is
+                # kept - the only change is holding idle connections open long
+                # enough to survive the gap between two customer messages,
+                # instead of re-handshaking TLS on every turn.
+                http_client=DefaultAsyncHttpxClient(
+                    limits=httpx.Limits(
+                        max_connections=100,
+                        max_keepalive_connections=20,
+                        keepalive_expiry=self.settings.http_keepalive_seconds,
+                    )
+                ),
             )
         return self._client
 

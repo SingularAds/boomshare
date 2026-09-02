@@ -206,11 +206,15 @@ class Lead(Base, TimestampMixin):
 class Conversation(Base, TimestampMixin):
     __tablename__ = "conversations"
     __table_args__ = (
-        # At most one open conversation per customer per channel.
+        # At most one open conversation per customer, per channel, per business
+        # number. The number belongs in the key because two of our numbers are
+        # two different threads on the customer's phone, each with its own 24h
+        # service window - collapsing them would answer one thread on the other.
         Index(
             "uq_conversations_open_per_customer",
             "customer_id",
             "channel",
+            "phone_number_id",
             unique=True,
             postgresql_where=text("status = 'open'"),
             sqlite_where=text("status = 'open'"),
@@ -225,6 +229,12 @@ class Conversation(Base, TimestampMixin):
     lead_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("leads.id", ondelete="SET NULL"))
 
     channel: Mapped[str] = mapped_column(String(32), nullable=False, default="whatsapp")
+    # Which of our WhatsApp numbers this thread is on. Deliberately not
+    # nullable and with no default: a follow-up sent days later has only this
+    # row to route by, so a conversation that does not know its own number
+    # would be answered from whichever number the config happened to list
+    # first. Better to fail at the one place conversations are created.
+    phone_number_id: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[ConversationStatus] = mapped_column(
         _enum(ConversationStatus, "conversation_status"),
         nullable=False,

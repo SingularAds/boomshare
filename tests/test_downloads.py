@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.ai.schemas import AiDecision
 from app.domain import SalesStage
-from app.models import Conversation, Customer, DownloadLink
-from app.services.downloads import normalise_platform
+from app.models import AiDecisionLog, Conversation, Customer, DownloadLink
 from tests.factories import signed, whatsapp_message_payload
 from tests.helpers import drain_queue
 
@@ -207,27 +206,14 @@ class TestFunnelReport:
 
 
 class TestPlatformOnTheLink:
-    """The platform slot is an install detail, so it has to survive to the link."""
+    """The reported platform has to survive as far as the installer URL."""
 
-    def test_free_text_is_mapped_onto_a_real_build(self):
-        assert normalise_platform("Windows") == "windows"
-        assert normalise_platform("windows 11 laptop") == "windows"
-        assert normalise_platform("Mac") == "macos"
-        assert normalise_platform("my macbook at work") == "macos"
-
-    def test_anything_unrecognised_becomes_none(self):
-        """It reaches a URL and a 32-char column, so it cannot be free text."""
-        assert normalise_platform("a phone") is None
-        assert normalise_platform("") is None
-        assert normalise_platform(None) is None
-        assert normalise_platform("linux") is None
-
-    async def test_a_known_platform_is_recorded_on_the_link(self, client, db, ai, meta):
+    async def test_a_reported_platform_is_recorded_on_the_link(self, client, db, ai, meta):
         ai.queue_decision(
             AiDecision(
                 reply_text="What are you on?",
                 intent="buying_intent",
-                customer_notes={"platform": "Windows"},
+                customer_platform="windows",
             )
         )
         await post(client, text="I want it")
@@ -238,6 +224,7 @@ class TestPlatformOnTheLink:
                 reply_text="Here you go.",
                 intent="download_request",
                 actions=["send_download_link"],
+                customer_platform="windows",
             )
         )
         await post(client, text="send it over")
@@ -246,6 +233,23 @@ class TestPlatformOnTheLink:
         link = (await db.execute(select(DownloadLink))).scalar_one()
         assert link.platform == "windows"
         assert "platform=windows" in link.url
+
+    async def test_an_unknown_platform_leaves_the_url_generic(self, client, db, ai, meta):
+        """The download page works without knowing the build, so not knowing is
+        never a reason to hold the link back."""
+        ai.queue_decision(
+            AiDecision(
+                reply_text="Here you go - Windows or Mac?",
+                intent="download_request",
+                actions=["send_download_link"],
+            )
+        )
+        await post(client, text="send it over")
+        await drain_queue()
+
+        link = (await db.execute(select(DownloadLink))).scalar_one()
+        assert link.platform is None
+        assert "platform=" not in link.url
 
 
 class TestAgentEffectivenessReport:
@@ -278,3 +282,89 @@ class TestAgentEffectivenessReport:
         assert report["ai_turns"] == 0
         assert report["passivity_rate"] == 0.0
         assert report["median_turns_to_link"] is None
+
+
+class TestAnswerThenOfferThenSend:
+    """The sales order a person would use, driven end to end.
+
+    From a live transcript: the customer asked about pricing and got the price,
+    an offer of the link, and the link itself all in one message - so "would you
+    like me to send it?" arrived with the answer already attached.
+
+    The fix is that offering and delivering are two different actions, so the
+    model says which message it is writing. The backend no longer infers that
+    from the wording; it just does what it was asked.
+    """
+
+    async def test_the_offer_turn_carries_no_link(self, client, db, ai, meta):
+        ai.queue_decision(
+            AiDecision(
+                reply_text=(
+                    "There's a free plan with unlimited 5-minute recordings. Would you "
+                    "like me to send you the download so you can try it?"
+                ),
+                intent="pricing_question",
+                suggested_stage=SalesStage.PRODUCT_EXPLAINED,
+                actions=["offer_download_link"],
+            )
+        )
+        await post(client, text="can you tell me about price")
+        await drain_queue()
+
+        assert "http" not in meta.texts[-1].body
+        assert (await db.execute(select(func.count()).select_from(DownloadLink))).scalar() == 0
+
+        decision = (await db.execute(select(AiDecisionLog))).scalar_one()
+        assert "offer_download_link" in decision.executed_actions["actions"]
+
+    async def test_saying_yes_gets_the_link(self, client, db, ai, meta):
+        ai.queue_decision(
+            AiDecision(
+                reply_text="Want me to send the download?",
+                intent="pricing_question",
+                actions=["offer_download_link"],
+            )
+        )
+        await post(client, text="can you tell me about price")
+        await drain_queue()
+
+        ai.queue_decision(
+            AiDecision(
+                reply_text="Here you go - the installer takes about a minute.",
+                intent="download_request",
+                actions=["send_download_link"],
+            )
+        )
+        await post(client, text="yes please")
+        await drain_queue()
+
+        link = (await db.execute(select(DownloadLink))).scalar_one()
+        assert link.url in meta.texts[-1].body
+        assert link.sent_at is not None
+
+        conversation = (await db.execute(select(Conversation))).scalar_one()
+        assert conversation.sales_stage == SalesStage.LINK_SENT
+
+    async def test_a_send_is_not_downgraded_because_of_how_it_reads(
+        self, client, db, ai, meta
+    ):
+        """The wording used to be pattern-matched, which only ever worked in
+        English. If the model asked to send, it meant send."""
+        ai.queue_decision(
+            AiDecision(
+                reply_text="Quer que eu envie o link para download? Aqui esta.",
+                intent="information_request",
+                actions=["send_download_link"],
+            )
+        )
+        await post(client, text="me manda o link")
+        await drain_queue()
+
+        assert "http" in meta.texts[-1].body
+
+    async def test_an_outright_request_still_skips_the_offer(self, client, db, ai, meta):
+        """"Send me the link" must never be answered with "shall I send it?"."""
+        await send_link(client, ai)
+
+        link = (await db.execute(select(DownloadLink))).scalar_one()
+        assert link.url in meta.texts[0].body

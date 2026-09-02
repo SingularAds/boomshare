@@ -59,7 +59,7 @@ jobs:
           docker run -d --name boomshare-ci -e PORT=8000 -p 8000:8000 \
             -e ENVIRONMENT=staging \
             -e META_APP_SECRET=ci -e META_VERIFY_TOKEN=ci -e META_ACCESS_TOKEN=ci \
-            -e WHATSAPP_PHONE_NUMBER_ID=ci -e OPENAI_API_KEY=ci -e INTERNAL_API_TOKEN=ci \
+            -e WHATSAPP_PHONE_NUMBER_IDS='["ci"]' -e OPENAI_API_KEY=ci -e INTERNAL_API_TOKEN=ci \
             -e DATABASE_URL='postgresql+asyncpg://ci:ci@127.0.0.1:5432/ci' \
             -e REDIS_URL='redis://127.0.0.1:6379/0' \
             boomshare-ai-backend:ci

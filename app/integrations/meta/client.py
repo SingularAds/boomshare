@@ -38,7 +38,15 @@ class MetaClient:
         if self._client is None:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0),
-                limits=httpx.Limits(max_connections=50, max_keepalive_connections=10),
+                limits=httpx.Limits(
+                    max_connections=50,
+                    max_keepalive_connections=10,
+                    # Without this the pool drops idle connections after 5s, so
+                    # the first call of every turn re-handshakes TLS. A stale
+                    # connection surfaces as an httpx.TransportError, which
+                    # `_request` already retries on a fresh one.
+                    keepalive_expiry=self.settings.http_keepalive_seconds,
+                ),
             )
         return self._client
 
@@ -114,7 +122,12 @@ class MetaClient:
         raise last_error
 
     def _messages_url(self, phone_number_id: str | None = None) -> str:
-        number = phone_number_id or self.settings.whatsapp_phone_number_id
+        """The send endpoint for one of our numbers.
+
+        Callers pass the number the conversation is on; the default is only
+        reached by a caller that genuinely has no thread to answer on.
+        """
+        number = phone_number_id or self.settings.default_phone_number_id
         return f"{self.settings.graph_url}/{number}/messages"
 
     @staticmethod

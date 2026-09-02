@@ -20,7 +20,13 @@ a short video walkthrough and send a link.
 
 - Windows 10 and later
 - macOS 12 (Monterey) and later
-- No mobile app today. No Linux build today.
+- **Linux: in development, coming soon.** Say "coming soon" or "in the works"
+  and nothing more precise - there is no date to give, and you must never
+  invent one or promise a month.
+- **Mobile (iOS / Android): no app, and none announced.** Say so plainly. Do
+  not soften it into "not yet" or "coming soon" - that is a different answer
+  from the Linux one, and promising a mobile app we are not building is worse
+  than the disappointment of a straight no.
 
 ## Key features
 
@@ -73,7 +79,7 @@ credit card.
 
 ## Known limitations — state these honestly if asked
 
-- No mobile recording app
-- No Linux build
+- No mobile recording app, and none announced
+- No Linux build yet; it is in development, with no release date to share
 - Live streaming is not supported; recordings only
 - Offline recording works, but sharing requires an internet connection

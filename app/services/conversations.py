@@ -38,13 +38,17 @@ logger = get_logger(__name__)
 # Lookup / creation
 # --------------------------------------------------------------------------- #
 async def get_open_conversation(
-    session: AsyncSession, customer_id: uuid.UUID, channel: str = "whatsapp"
+    session: AsyncSession,
+    customer_id: uuid.UUID,
+    phone_number_id: str,
+    channel: str = "whatsapp",
 ) -> Conversation | None:
     stmt = (
         select(Conversation)
         .where(
             Conversation.customer_id == customer_id,
             Conversation.channel == channel,
+            Conversation.phone_number_id == phone_number_id,
             Conversation.status == ConversationStatus.OPEN,
         )
         .order_by(desc(Conversation.created_at))
@@ -53,19 +57,47 @@ async def get_open_conversation(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def open_conversations(
+    session: AsyncSession, customer_id: uuid.UUID, channel: str = "whatsapp"
+) -> list[Conversation]:
+    """Every open thread this customer has with us, newest first.
+
+    There is one per business number they have written to. Facts about the
+    *person* rather than the thread - they installed, they activated - apply to
+    all of them, so those callers ask for the list rather than picking one.
+    """
+    stmt = (
+        select(Conversation)
+        .where(
+            Conversation.customer_id == customer_id,
+            Conversation.channel == channel,
+            Conversation.status == ConversationStatus.OPEN,
+        )
+        .order_by(desc(Conversation.created_at))
+    )
+    return list((await session.execute(stmt)).scalars())
+
+
 async def get_or_create_open_conversation(
     session: AsyncSession,
     customer: Customer,
     *,
+    phone_number_id: str,
     channel: str = "whatsapp",
     lead_id: uuid.UUID | None = None,
 ) -> tuple[Conversation, bool]:
-    """One open conversation per customer per channel.
+    """One open conversation per customer, per channel, per business number.
 
     A partial unique index enforces this in PostgreSQL, so a concurrent retry
     loses the insert race and re-reads the winner's row.
+
+    The number is part of the key, not incidental data on the row. Someone who
+    writes to our Brazil number and later to our US one is holding two separate
+    WhatsApp threads, each with its own 24-hour service window; sharing one
+    conversation between them would answer whichever thread the row happened to
+    remember and leave the other silent.
     """
-    existing = await get_open_conversation(session, customer.id, channel)
+    existing = await get_open_conversation(session, customer.id, phone_number_id, channel)
     if existing is not None:
         if lead_id and existing.lead_id is None:
             existing.lead_id = lead_id
@@ -82,12 +114,17 @@ async def get_or_create_open_conversation(
         },
         customer_id=customer.id,
         channel=channel,
+        phone_number_id=phone_number_id,
         status=ConversationStatus.OPEN,
     )
     if created:
         logger.info(
             "conversation opened",
-            extra={"conversation_id": str(conversation.id), "customer_id": str(customer.id)},
+            extra={
+                "conversation_id": str(conversation.id),
+                "customer_id": str(customer.id),
+                "phone_number_id": phone_number_id,
+            },
         )
     return conversation, created
 

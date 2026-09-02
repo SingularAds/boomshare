@@ -225,7 +225,9 @@ class TestOurGuardsMatchMetas:
             session.add(customer)
             await session.flush()
             conversation = Conversation(
-                customer_id=customer.id, last_inbound_at=utcnow() - timedelta(hours=30)
+                customer_id=customer.id,
+                phone_number_id=fake_meta.PHONE_NUMBER_ID,
+                last_inbound_at=utcnow() - timedelta(hours=30),
             )
             session.add(conversation)
             await session.flush()
@@ -246,7 +248,11 @@ class TestOurGuardsMatchMetas:
             customer = Customer(phone=ALLOWED, wa_id=ALLOWED, full_name="Priya")
             session.add(customer)
             await session.flush()
-            conversation = Conversation(customer_id=customer.id, last_inbound_at=utcnow())
+            conversation = Conversation(
+                customer_id=customer.id,
+                phone_number_id=fake_meta.PHONE_NUMBER_ID,
+                last_inbound_at=utcnow(),
+            )
             session.add(conversation)
             await session.flush()
 

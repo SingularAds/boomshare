@@ -252,6 +252,10 @@ class AiAction(StrEnum):
     """Business actions the AI may *request*. The application decides and executes."""
 
     NONE = "none"
+    #: Offering the download and handing it over are two different messages, so
+    #: they are two different actions. Collapsing them into one is what let a
+    #: reply ask "shall I send you the link?" and carry the link anyway.
+    OFFER_DOWNLOAD_LINK = "offer_download_link"
     SEND_DOWNLOAD_LINK = "send_download_link"
     SCHEDULE_FOLLOW_UP = "schedule_follow_up"
     REQUEST_HUMAN_HANDOFF = "request_human_handoff"
@@ -259,26 +263,47 @@ class AiAction(StrEnum):
     OPT_OUT = "opt_out"
 
 
-#: Substrings that identify each desktop build in something a customer typed.
-_PLATFORM_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("macos", ("mac", "osx", "os x", "apple", "imac", "macbook")),
-    ("windows", ("windows", "win10", "win 10", "win11", "win 11", "pc", "laptop pc")),
-)
+class CustomerPlatform(StrEnum):
+    """What the customer is on, as reported by the model.
+
+    Deliberately the *model's* judgement rather than the backend's. This started
+    as a substring list - "mobile", "phone", "android", ... - and it silently
+    failed on everything a real person types: `Samsung Galaxy`, `Redmi Note 12`,
+    `my cell`, `celular` and `Pixel 8` all fell through to "not recognised", and
+    the desktop installer went out anyway. Placing an unconstrained sentence
+    into one of four buckets is exactly what a language model is good at and a
+    keyword list is not, so the model is asked directly and the backend only
+    reads the answer.
+    """
+
+    #: They have not said, or it has not come up. Never a reason to withhold:
+    #: the download page works without knowing the build.
+    UNKNOWN = "unknown"
+    WINDOWS = "windows"
+    MACOS = "macos"
+    #: A phone, a tablet, Linux - anything with no build to install today.
+    OTHER = "other"
+
+    @property
+    def has_installer(self) -> bool:
+        return self in (CustomerPlatform.WINDOWS, CustomerPlatform.MACOS)
 
 
-def normalise_platform(value: str | None) -> str | None:
-    """Map a free-text platform note onto one of the two builds we ship.
+def read_platform(value: str | None) -> CustomerPlatform:
+    """Parse a stored platform note back into the enum, tolerantly.
 
-    The value reaches us from the model's `customer_notes`, so it can be
-    anything from "Windows" to "macbook at work" to "mobile". Anything that is
-    not a build we actually ship becomes None - which both keeps free text out
-    of the download URL and stops "mobile" counting as a known platform and
-    releasing a desktop link to someone holding a phone.
+    Anything that is not one of ours becomes `UNKNOWN`, never `OTHER`.
+    Concluding "they cannot run it" from a word we do not recognise is the
+    mistake this field exists to stop making.
     """
     if not value:
-        return None
-    lowered = str(value).strip().lower()
-    for platform, hints in _PLATFORM_HINTS:
-        if any(hint in lowered for hint in hints):
-            return platform
-    return None
+        return CustomerPlatform.UNKNOWN
+    try:
+        return CustomerPlatform(str(value).strip().lower())
+    except ValueError:
+        return CustomerPlatform.UNKNOWN
+
+
+def installer_for(platform: CustomerPlatform) -> str | None:
+    """Which build a download link should point at, or None to let the page decide."""
+    return platform.value if platform.has_installer else None

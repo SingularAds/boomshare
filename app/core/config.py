@@ -49,7 +49,19 @@ class Settings(BaseSettings):
     meta_access_token: SecretStr = SecretStr("")
     meta_graph_version: str = "v26.0"
     meta_graph_base_url: str = "https://graph.facebook.com"
-    whatsapp_phone_number_id: str = ""
+    # How long an idle HTTPS connection to Meta or OpenAI is kept open. httpx
+    # defaults this to 5 seconds, which is shorter than the gap between two
+    # messages in a real conversation (measured: 24-44s), so every customer
+    # message paid a fresh TLS handshake to both providers. Comfortably longer
+    # than that gap, and comfortably shorter than the idle timeout an upstream
+    # load balancer is likely to enforce.
+    http_keepalive_seconds: float = 120.0
+    # Every WhatsApp number this deployment answers on, most important first.
+    # They all arrive at the same webhook - Meta signs with the app secret, not
+    # per number - so this list exists to answer two questions the payload
+    # cannot: is this number ours, and which one do we send from when there is
+    # no inbound message to answer (a lead ad). The first entry is that default.
+    whatsapp_phone_number_ids: tuple[str, ...] = ()
     # Approved template used to open a conversation with a lead-ad lead.
     whatsapp_lead_template_name: str = "boomshare_lead_intro"
     whatsapp_lead_template_language: str = "en"
@@ -80,10 +92,13 @@ class Settings(BaseSettings):
     history_message_limit: int = 20
     ai_reply_lock_seconds: int = 30
     inbound_rate_limit_per_minute: int = 20
-    # Automatic check-in when a live conversation ends a turn with nothing
-    # queued. Kept under `service_window_hours` on purpose: inside the window
-    # the follow-up can be a normal AI message instead of a template.
-    default_follow_up_hours: float = 20.0
+    # Automatic check-ins when a live conversation ends a turn with nothing
+    # queued: one entry per unanswered nudge, and the length of the list is the
+    # cap. Someone who ignored two messages will not answer a third an hour
+    # later, and continuing to send them is what costs a WhatsApp number its
+    # quality rating. The first gap stays under `service_window_hours` so that
+    # nudge can be a normal AI message rather than a template.
+    follow_up_ladder_hours: tuple[float, ...] = (4.0, 20.0, 72.0)
 
     # ---- worker ----------------------------------------------------------
     run_embedded_worker: bool = True
@@ -104,6 +119,23 @@ class Settings(BaseSettings):
     def _upper(cls, v: str) -> str:
         return v.upper()
 
+    @field_validator("whatsapp_phone_number_ids", mode="after")
+    @classmethod
+    def _clean_phone_number_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject the two ways this list goes wrong when a number is added.
+
+        A blank entry would send to `/v26.0//messages`, and a duplicate would
+        make "which number is the default" depend on list order in a way nobody
+        would think to check. Both are typos at deploy time, so they fail here
+        rather than on the first customer message.
+        """
+        cleaned = [str(item).strip() for item in value]
+        if any(not item for item in cleaned):
+            raise ValueError("WHATSAPP_PHONE_NUMBER_IDS contains a blank entry")
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError(f"WHATSAPP_PHONE_NUMBER_IDS contains duplicates: {cleaned}")
+        return tuple(cleaned)
+
     @model_validator(mode="after")
     def _require_secrets_when_deployed(self) -> Settings:
         """Fail fast on a misconfigured staging / production boot.
@@ -119,7 +151,7 @@ class Settings(BaseSettings):
             "META_APP_SECRET": self.meta_app_secret.get_secret_value(),
             "META_VERIFY_TOKEN": self.meta_verify_token.get_secret_value(),
             "META_ACCESS_TOKEN": self.meta_access_token.get_secret_value(),
-            "WHATSAPP_PHONE_NUMBER_ID": self.whatsapp_phone_number_id,
+            "WHATSAPP_PHONE_NUMBER_IDS": self.default_phone_number_id,
             "OPENAI_API_KEY": self.openai_api_key.get_secret_value(),
             "INTERNAL_API_TOKEN": self.internal_api_token.get_secret_value(),
         }
@@ -137,6 +169,26 @@ class Settings(BaseSettings):
     @property
     def graph_url(self) -> str:
         return f"{self.meta_graph_base_url}/{self.meta_graph_version}"
+
+    @property
+    def default_phone_number_id(self) -> str:
+        """The number we send from when nothing tells us which one to use.
+
+        Only lead ads reach this: a lead-ad submission has no phone number in
+        it, because the customer has not messaged us yet. Every reply to an
+        actual message is routed by the conversation it belongs to.
+        """
+        return self.whatsapp_phone_number_ids[0] if self.whatsapp_phone_number_ids else ""
+
+    def knows_phone_number(self, phone_number_id: str | None) -> bool:
+        """Is this one of our numbers?
+
+        A webhook for a number we do not know means Meta and this deployment
+        disagree about what we own - usually a number added in Business Manager
+        and not in the environment. We store the message either way; we just do
+        not answer from an identity we cannot vouch for.
+        """
+        return bool(phone_number_id) and phone_number_id in self.whatsapp_phone_number_ids
 
     @property
     def is_test(self) -> bool:

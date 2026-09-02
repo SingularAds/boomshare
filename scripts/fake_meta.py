@@ -49,7 +49,11 @@ _console.setup()
 # --------------------------------------------------------------------------- #
 # State
 # --------------------------------------------------------------------------- #
-PHONE_NUMBER_ID = "111222333"
+#: Every number this fake WABA owns, primary first - mirroring the
+#: application's own WHATSAPP_PHONE_NUMBER_IDS convention, so the sandbox can
+#: show a reply leaving from the number the customer wrote to.
+PHONE_NUMBER_IDS = ("111222333", "444555666")
+PHONE_NUMBER_ID = PHONE_NUMBER_IDS[0]
 BUSINESS_NUMBER = "15550001111"
 
 #: 24 hours, in seconds. The customer service window.
@@ -217,7 +221,7 @@ async def send_message(
         _log("send", False, f"bad graph version {version!r}")
         return meta_error(400, 100, f"Unknown path components: /{version}")
 
-    if phone_number_id != PHONE_NUMBER_ID:
+    if phone_number_id not in PHONE_NUMBER_IDS:
         _log("send", False, f"unknown phone_number_id {phone_number_id!r}")
         return meta_error(
             404,
@@ -274,19 +278,28 @@ async def send_message(
     message_type = body.get("type")
 
     if message_type == "text":
-        return _handle_text(body, to)
+        return _handle_text(body, to, phone_number_id)
     if message_type == "template":
-        return _handle_template(body, to)
+        return _handle_template(body, to, phone_number_id)
 
     _log("send", False, f"unsupported type {message_type!r}")
     return meta_error(400, 100, f"Param type must be one of text, template (got {message_type})")
 
 
-def _accept(to: str, kind: str, body: dict[str, Any], summary: str):
+def _accept(to: str, kind: str, body: dict[str, Any], summary: str, phone_number_id: str):
     global _counter
     _counter += 1
     message_id = f"wamid.FAKE{_counter:05d}"
-    OUTBOX.append({"id": message_id, "to": to, "kind": kind, "body": body, "at": time.time()})
+    OUTBOX.append(
+        {
+            "id": message_id,
+            "to": to,
+            "kind": kind,
+            "body": body,
+            "from_phone_number_id": phone_number_id,
+            "at": time.time(),
+        }
+    )
     _log("send", True, summary, body)
     return {
         "messaging_product": "whatsapp",
@@ -295,7 +308,7 @@ def _accept(to: str, kind: str, body: dict[str, Any], summary: str):
     }
 
 
-def _handle_text(body: dict[str, Any], to: str):
+def _handle_text(body: dict[str, Any], to: str, phone_number_id: str):
     text = body.get("text")
     if not isinstance(text, dict) or not text.get("body"):
         _log("send", False, "type=text but text.body is missing")
@@ -322,10 +335,10 @@ def _handle_text(body: dict[str, Any], to: str):
             ),
         )
 
-    return _accept(to, "text", body, f'text to {to}: "{content[:60]}"')
+    return _accept(to, "text", body, f'text to {to}: "{content[:60]}"', phone_number_id)
 
 
-def _handle_template(body: dict[str, Any], to: str):
+def _handle_template(body: dict[str, Any], to: str, phone_number_id: str):
     template = body.get("template")
     if not isinstance(template, dict) or not template.get("name"):
         _log("send", False, "type=template but template.name is missing")
@@ -381,7 +394,9 @@ def _handle_template(body: dict[str, Any], to: str):
             ),
         )
 
-    return _accept(to, "template", body, f"template '{name}' to {to} with {supplied} param(s)")
+    return _accept(
+        to, "template", body, f"template '{name}' to {to} with {supplied} param(s)", phone_number_id
+    )
 
 
 @router.get("/{version}/{node_id}")
@@ -454,7 +469,7 @@ async def get_log():
 @control.get("/state")
 async def get_state():
     return {
-        "phone_number_id": PHONE_NUMBER_ID,
+        "phone_number_ids": list(PHONE_NUMBER_IDS),
         "allowlist_enforced": ENFORCE_ALLOWLIST,
         "allowed_recipients": sorted(ALLOWED_RECIPIENTS),
         "templates": {
@@ -523,7 +538,7 @@ if __name__ == "__main__":
     import uvicorn
 
     print("Fake Meta Graph API on http://127.0.0.1:8090")
-    print(f"  phone_number_id : {PHONE_NUMBER_ID}")
+    print(f"  phone_number_ids: {', '.join(PHONE_NUMBER_IDS)}")
     print(f"  templates       : {', '.join(TEMPLATES)}")
     print(f"  allowed to      : {', '.join(sorted(ALLOWED_RECIPIENTS))}")
     print("\nPoint the backend at it with:")

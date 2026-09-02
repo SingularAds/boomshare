@@ -73,7 +73,7 @@ class TestScheduling:
         assert "auto_follow_up" in decision.executed_actions["actions"]
 
         reminder = (await db.execute(select(Reminder))).scalar_one()
-        assert reminder.reason == "automatic check-in - no reply expected yet"
+        assert reminder.reason.startswith("automatic check-in")
 
     async def test_repeat_requests_replace_rather_than_pile_up(self, client, db, ai, meta):
         await start_conversation(client, ai, text="not now")
@@ -553,3 +553,127 @@ class TestTheDeferredCallback:
             ).scalars()
         )
         assert len(pending) == 1
+
+
+class TestTheFollowUpLadder:
+    """Following up has to end.
+
+    Every turn queued a check-in, and every check-in was itself a turn, so a
+    customer who simply stopped answering was messaged on the same 20-hour
+    cycle forever. Verified before the fix: six nudges and still going, with no
+    stage that would ever stop it.
+    """
+
+    async def test_the_gaps_widen_with_each_unanswered_message(self):
+        ladder = reminder_service.follow_up_ladder()
+        assert list(ladder) == sorted(ladder), "each check-in should wait longer than the last"
+
+    async def test_the_ladder_ends(self):
+        rungs = len(reminder_service.follow_up_ladder())
+        assert reminder_service.follow_up_delay(rungs - 1) is not None
+        assert reminder_service.follow_up_delay(rungs) is None
+
+    async def test_a_silent_customer_is_not_messaged_forever(self, client, db, ai, meta):
+        ai.queue_decision(
+            AiDecision(reply_text="Boomshare records your screen. What for?", intent="greeting")
+        )
+        await post(client, text="hi")
+        await drain_queue()
+        replies_to_a_real_message = len(meta.sent)
+
+        from app.services.conversation_flow import send_follow_up
+
+        for index in range(len(reminder_service.follow_up_ladder()) + 3):
+            pending = list(
+                (
+                    await db.execute(
+                        select(Reminder).where(Reminder.status == ReminderStatus.PENDING)
+                    )
+                ).scalars()
+            )
+            if not pending:
+                break
+            await make_due(db, pending[0].id)
+            ai.queue_decision(AiDecision(reply_text=f"nudge {index}", intent="small_talk"))
+            await send_follow_up(pending[0].id)
+
+        nudges = len(meta.sent) - replies_to_a_real_message
+        assert nudges == len(reminder_service.follow_up_ladder())
+
+    async def test_a_customer_reply_resets_the_ladder(self, client, db, ai, meta):
+        """Answering is the one signal that the conversation is still alive."""
+        ai.queue_decision(AiDecision(reply_text="Hey! What would you record?", intent="greeting"))
+        await post(client, text="hi")
+        await drain_queue()
+
+        from app.services.conversation_flow import send_follow_up
+
+        reminder = (await db.execute(select(Reminder))).scalar_one()
+        await make_due(db, reminder.id)
+        # Distinct from the reply above: an identical one would be suppressed
+        # as a repeat and would never count against the ladder.
+        ai.queue_decision(AiDecision(reply_text="Still there?", intent="small_talk"))
+        await send_follow_up(reminder.id)
+
+        async def _count(session):
+            conversation = (await session.execute(select(Conversation))).scalar_one()
+            return await reminder_service.follow_ups_since_reply(session, conversation)
+
+        assert await db.write(_count) == 1
+
+        await post(client, text="sorry, was busy")
+        await drain_queue()
+
+        assert await db.write(_count) == 0
+
+    async def test_each_check_in_is_told_to_say_something_new(self, client, db, ai, meta):
+        """The second nudge repeating the first is how a sequence becomes noise."""
+        ai.queue_decision(AiDecision(reply_text="What would you record?", intent="greeting"))
+        await post(client, text="hi")
+        await drain_queue()
+
+        from app.services.conversation_flow import send_follow_up
+
+        directives = []
+        for _ in range(len(reminder_service.follow_up_ladder())):
+            pending = list(
+                (
+                    await db.execute(
+                        select(Reminder).where(Reminder.status == ReminderStatus.PENDING)
+                    )
+                ).scalars()
+            )
+            if not pending:
+                break
+            await make_due(db, pending[0].id)
+            ai.queue_decision(
+                AiDecision(reply_text=f"checking in #{len(directives) + 1}", intent="small_talk")
+            )
+            await send_follow_up(pending[0].id)
+            directives.append(
+                next(
+                    m["content"]
+                    for m in ai.last_prompt
+                    if m["role"] == "system" and m["content"].startswith("# What to do right now")
+                )
+            )
+
+        assert len(directives) == len(set(directives)), "two check-ins were given the same job"
+        assert "last time" in directives[-1], "the final nudge should say goodbye, not trail off"
+
+    async def test_a_promised_callback_is_still_kept(self, client, db, ai, meta):
+        """The cap is on nudges nobody asked for, not on promises we made."""
+        ai.queue_decision(
+            AiDecision(
+                reply_text="No problem - I'll check back in five minutes.",
+                intent="information_request",
+                actions=["schedule_follow_up"],
+                follow_up_minutes=5,
+            )
+        )
+        await post(client, text="give me five minutes")
+        await drain_queue()
+
+        reminder = (await db.execute(select(Reminder))).scalar_one()
+        assert reminder.status == ReminderStatus.PENDING
+        assert as_utc(reminder.due_at) - utcnow() <= timedelta(minutes=5)

@@ -1,8 +1,9 @@
 """Outbound WhatsApp messaging.
 
-Every message we send goes through here, so three things are guaranteed in one
+Every message we send goes through here, so four things are guaranteed in one
 place: Meta's 24-hour window rule is respected, opted-out customers are never
-messaged, and what we sent is persisted whether the send succeeded or failed.
+messaged, every message leaves from the number the conversation is actually on,
+and what we sent is persisted whether the send succeeded or failed.
 
 A failed send is still recorded (status `failed`, with the provider error) - a
 message that vanished without a trace is the hardest thing to debug later.
@@ -65,7 +66,11 @@ async def send_text(
 
     client = client or get_meta_client()
     try:
-        result = await client.send_text(customer.wa_id or customer.phone, body)
+        result = await client.send_text(
+            customer.wa_id or customer.phone,
+            body,
+            phone_number_id=_sender(conversation),
+        )
     except MetaApiError as exc:
         message = await conversation_service.record_outbound_message(
             session,
@@ -125,6 +130,7 @@ async def send_template(
             template_name,
             language_code=language,
             body_parameters=body_parameters,
+            phone_number_id=_sender(conversation),
         )
     except MetaApiError as exc:
         message = await conversation_service.record_outbound_message(
@@ -190,6 +196,17 @@ async def send_reply(
             preview_text=body,
             client=client,
         )
+
+
+def _sender(conversation: Conversation) -> str | None:
+    """Which of our numbers this conversation is answered from.
+
+    `None` lets the client fall back to the configured default. That only
+    happens for a row written before the number was recorded; every
+    conversation created since carries its own, and routing by the row is what
+    keeps a reply in the thread the customer actually opened.
+    """
+    return conversation.phone_number_id or None
 
 
 def _policy_block(conversation: Conversation, customer: Customer) -> str | None:

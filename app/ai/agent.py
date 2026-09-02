@@ -72,6 +72,11 @@ async def generate_reply(
         return None
 
     outcome = validate_decision(
-        call.decision, conversation.sales_stage, settings.max_reply_characters
+        call.decision,
+        conversation.sales_stage,
+        settings.max_reply_characters,
+        # What we already knew about their machine. The model reports it again
+        # on every turn, so this only fills in when this turn left it unknown.
+        known_platform=(conversation.context_notes or {}).get("platform"),
     )
     return AgentResult(call, outcome)

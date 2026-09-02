@@ -148,12 +148,31 @@ def status_payload(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _default_phone_number_id() -> str:
+    """The first number from WHATSAPP_PHONE_NUMBER_IDS, or the sandbox default.
+
+    Read straight from the environment rather than through Settings: this
+    script is aimed at a *running* instance and must not need the application's
+    full configuration to be valid.
+    """
+    raw = os.getenv("WHATSAPP_PHONE_NUMBER_IDS", "")
+    try:
+        ids = json.loads(raw) if raw else []
+    except json.JSONDecodeError:
+        ids = []
+    return str(ids[0]) if ids else "111222333"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--url", default=os.getenv("WEBHOOK_URL", "http://localhost:8000/webhooks/meta"))
     parser.add_argument("--secret", default=os.getenv("META_APP_SECRET", ""))
     parser.add_argument("--wa-id", default="919876543210", help="customer phone, E.164 without +")
-    parser.add_argument("--phone-number-id", default=os.getenv("WHATSAPP_PHONE_NUMBER_ID", "111222333"))
+    parser.add_argument(
+        "--phone-number-id",
+        default=_default_phone_number_id(),
+        help="which of our numbers the message arrived on",
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 

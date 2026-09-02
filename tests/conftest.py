@@ -20,7 +20,9 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
 os.environ.setdefault("META_VERIFY_TOKEN", "test-verify-token")
 os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
-os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "111222333")
+# Two numbers throughout, so nothing can pass by assuming there is one.
+# The first is the default sender and matches `scripts/fake_meta.py`.
+os.environ.setdefault("WHATSAPP_PHONE_NUMBER_IDS", '["111222333", "444555666"]')
 os.environ.setdefault("META_GRAPH_VERSION", "v26.0")
 os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 os.environ.setdefault("INTERNAL_API_TOKEN", "test-internal-token")
