@@ -34,13 +34,12 @@ import fakeredis.aioredis  # noqa: E402
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
-from sqlalchemy import event  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 
 import app.models  # noqa: F401,E402  - registers the tables on Base.metadata
 from app.core import redis as redis_helper  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
-from app.core.db import Base, set_session_factory  # noqa: E402
+from app.core.db import Base, configure_sqlite, set_session_factory  # noqa: E402
 from app.integrations.meta.client import set_meta_client  # noqa: E402
 from app.integrations.openai.client import set_sales_model  # noqa: E402
 from app.main import create_app  # noqa: E402
@@ -64,17 +63,9 @@ async def engine(tmp_path):
         f"sqlite+aiosqlite:///{tmp_path / 'test.db'}",
         connect_args={"check_same_thread": False, "timeout": 30},
     )
-
-    # pysqlite (and therefore aiosqlite) emits its own implicit transactions,
-    # which breaks SAVEPOINT - and `insert_or_get` relies on savepoints for its
-    # race-safe insert. This is SQLAlchemy's documented workaround.
-    @event.listens_for(engine.sync_engine, "connect")
-    def _disable_implicit_begin(dbapi_connection, _record):
-        dbapi_connection.isolation_level = None
-
-    @event.listens_for(engine.sync_engine, "begin")
-    def _explicit_begin(connection):
-        connection.exec_driver_sql("BEGIN")
+    # The same SQLite setup the application applies to its own engine, so the
+    # tests exercise the database the way the app actually talks to it.
+    configure_sqlite(engine)
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)

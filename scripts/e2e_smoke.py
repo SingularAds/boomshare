@@ -337,6 +337,54 @@ async def drain(timeout: float = 15.0) -> None:
     print(f"  {RED}timed out waiting for the worker{RESET}")
 
 
+async def failed_event_count() -> int:
+    """How many webhook events are sitting in `failed`.
+
+    Earlier steps park events deliberately (the OpenAI outage), so the
+    concurrency checks compare this before and after rather than expecting zero.
+    """
+    from sqlalchemy import func, select
+
+    from app.core.db import session_scope
+    from app.domain import WebhookStatus
+    from app.models import WebhookEvent
+
+    async with session_scope() as session:
+        return int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(WebhookEvent)
+                    .where(WebhookEvent.status == WebhookStatus.FAILED)
+                )
+            ).scalar_one()
+        )
+
+
+async def retried_event_count() -> int:
+    """How many webhook events have been attempted more than once.
+
+    Losing the conversation lock used to cost an attempt as well as the delay,
+    so a customer who simply typed quickly could exhaust `worker_max_attempts`
+    and have their message parked for good.
+    """
+    from sqlalchemy import func, select
+
+    from app.core.db import session_scope
+    from app.models import WebhookEvent
+
+    async with session_scope() as session:
+        return int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(WebhookEvent)
+                    .where(WebhookEvent.attempts > 1)
+                )
+            ).scalar_one()
+        )
+
+
 # --------------------------------------------------------------------------- #
 # The journey
 # --------------------------------------------------------------------------- #
@@ -1198,6 +1246,62 @@ async def run_journey() -> None:
               len(await promised_rows("pending")) == 0)
         check("but the customer is still answered",
               len(whatsapp_outbox) > sent_before)
+
+        # ---------------------------------------------------------------- #
+        step("28. Five customers message at the same instant")
+        # The production symptom: several people write in at once and the last
+        # of them waits for everyone ahead. Nothing about answering one requires
+        # waiting for another's model call, so all five turns overlap - and the
+        # thing to prove is that overlapping them changes no outcome.
+        crowd = [f"9190000{n:05d}" for n in range(1, 6)]
+        sent_before = len(whatsapp_outbox)
+        failed_before = await failed_event_count()
+
+        await asyncio.gather(
+            *(
+                signed_post(http, inbound("hi, what is Boomshare?", wa_id=wa_id))
+                for wa_id in crowd
+            )
+        )
+        await drain(timeout=30)
+
+        replies = whatsapp_outbox[sent_before:]
+        answered = {message["to"] for message in replies}
+        check("every customer got an answer", answered == set(crowd),
+              f"{len(answered)} of {len(crowd)} answered")
+        check("and exactly one each - nobody was answered twice",
+              len(replies) == len(crowd), f"{len(replies)} replies for {len(crowd)} customers")
+        check("no event was parked while they overlapped",
+              await failed_event_count() == failed_before)
+
+        # ---------------------------------------------------------------- #
+        step("29. One customer fires three messages in a row")
+        # These *must* serialise - two overlapping replies to one thread is what
+        # the conversation lock exists to prevent. What changed is the cost of
+        # losing that race: the message now waits its turn instead of being
+        # parked until the next sweep, which is what made a second message take
+        # three minutes to answer.
+        impatient = "919000099999"
+        sent_before = len(whatsapp_outbox)
+        failed_before = await failed_event_count()
+        retried_before = await retried_event_count()
+
+        await asyncio.gather(
+            *(
+                signed_post(http, inbound(text, wa_id=impatient, name="Ravi"))
+                for text in ("hi", "are you there?", "hello??")
+            )
+        )
+        await drain(timeout=40)
+
+        replies = whatsapp_outbox[sent_before:]
+        check("all three messages were answered", len(replies) == 3, f"{len(replies)} replies")
+        check("none of them was parked for the sweeper to find",
+              await failed_event_count() == failed_before)
+
+        check("and none of them burned a retry attempt",
+              await retried_event_count() == retried_before,
+              f"{await retried_event_count()} retried, was {retried_before}")
 
 
 # --------------------------------------------------------------------------- #

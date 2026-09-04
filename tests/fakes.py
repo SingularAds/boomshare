@@ -8,6 +8,7 @@ number") rather than on HTTP calls.
 from __future__ import annotations
 
 import itertools
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -119,12 +120,20 @@ class FakeSalesModel:
         )
         self.calls: list[list[dict[str, str]]] = []
         self.raise_with: Exception | None = None
+        #: Awaited while the call is "in flight". Real model calls take seconds,
+        #: and what the rest of the system is doing during those seconds is
+        #: exactly what the throughput tests need to observe - whether a
+        #: database connection is still checked out, whether another
+        #: conversation is being answered at the same time.
+        self.on_decide: Callable[[], Awaitable[None]] | None = None
 
     def queue_decision(self, decision: AiDecision) -> None:
         self.queue.append(decision)
 
     async def decide(self, messages: list[dict[str, str]]) -> AiCallResult:
         self.calls.append(messages)
+        if self.on_decide is not None:
+            await self.on_decide()
         if self.raise_with is not None:
             raise self.raise_with
         decision = self.queue.pop(0) if self.queue else self.default

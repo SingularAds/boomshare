@@ -312,3 +312,57 @@ async def agent_effectiveness_report(
         adjusted_decisions=adjusted_decisions,
         median_turns_to_link=await _median_turns_to_link(session),
     )
+
+
+@router.post("/reset")
+async def reset_data(
+    phone: str | None = Query(default=None, description="Optional phone number to reset specifically"),
+    session: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    """Reset data across tables and Redis cache for re-testing.
+
+    If `phone` is given, deletes that specific customer and their cascaded records.
+    If no `phone` is given, clears all customers, leads, conversations, messages,
+    decision logs, reminders, download links, and webhook events.
+    """
+    from sqlalchemy import delete
+
+    from app.core import redis as redis_helper
+    from app.models import Ad, Campaign, Customer, WebhookEvent
+
+    if phone:
+        phone_clean = phone.lstrip("+").strip()
+        customer = (
+            await session.execute(
+                select(Customer).where((Customer.phone == phone_clean) | (Customer.wa_id == phone_clean))
+            )
+        ).scalar_one_or_none()
+        if customer is None:
+            return {"status": "not_found", "phone": phone}
+        await session.delete(customer)
+        await session.commit()
+        try:
+            r = redis_helper.get_redis()
+            keys = await r.keys(f"*{phone_clean}*")
+            if keys:
+                await r.delete(*keys)
+        except Exception:
+            pass
+        logger.info("admin reset completed for customer", extra={"phone": phone_clean})
+        return {"status": "reset", "phone": phone_clean}
+
+    # Wipe all customer data & webhooks
+    await session.execute(delete(Customer))
+    await session.execute(delete(WebhookEvent))
+    await session.execute(delete(Ad))
+    await session.execute(delete(Campaign))
+    await session.commit()
+
+    try:
+        await redis_helper.get_redis().flushdb()
+    except Exception:
+        pass
+
+    logger.info("admin reset completed for all test data")
+    return {"status": "reset_all", "message": "all test data cleared"}
+

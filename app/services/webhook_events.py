@@ -136,6 +136,14 @@ async def stale_event_ids(session: AsyncSession, limit: int = 50) -> list[uuid.U
     Covers the two ways the fast path can lose work: Redis was unavailable when
     the API tried to enqueue, or a worker died mid-job. Anything older than the
     sweep threshold and not yet processed is fair game.
+
+    `processed_at IS NULL` is what makes "not yet processed" true. Without it a
+    permanently parked event - `mark_failed(retryable=False)` stamps
+    `processed_at` but leaves the status `failed` and the attempts below the cap
+    - matched this query forever and was re-enqueued on every sweep, only for
+    `claim` to refuse it. Because the batch is ordered oldest-first, twenty such
+    events were enough to fill it permanently and starve the genuinely stuck
+    work this sweep exists to recover.
     """
     settings = get_settings()
     cutoff = utcnow() - timedelta(seconds=settings.webhook_sweep_after_seconds)
@@ -145,6 +153,7 @@ async def stale_event_ids(session: AsyncSession, limit: int = 50) -> list[uuid.U
             WebhookEvent.status.in_(
                 [WebhookStatus.PENDING, WebhookStatus.PROCESSING, WebhookStatus.FAILED]
             ),
+            WebhookEvent.processed_at.is_(None),
             WebhookEvent.received_at <= cutoff,
             WebhookEvent.attempts < settings.worker_max_attempts,
         )

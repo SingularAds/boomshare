@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from sqlalchemy import JSON, MetaData
+from sqlalchemy import JSON, MetaData, event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -44,7 +44,45 @@ def _engine_kwargs(settings: Settings) -> dict[str, Any]:
     if settings.database_url.startswith("postgresql"):
         kwargs["pool_size"] = settings.db_pool_size
         kwargs["max_overflow"] = settings.db_max_overflow
+    if settings.database_url.startswith("sqlite"):
+        # Wait for a busy database rather than failing instantly. See
+        # `configure_sqlite` for why this only helps once transactions are
+        # IMMEDIATE.
+        kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
     return kwargs
+
+
+def configure_sqlite(engine: AsyncEngine) -> None:
+    """Make SQLite behave enough like PostgreSQL to run this application.
+
+    SQLite is not the production database. It is what the test suite and
+    `scripts/e2e_smoke.py` run against, so neither needs a server - which is
+    only worth anything if the application behaves the same way on it.
+
+    Two defaults have to change:
+
+    * **No implicit transactions.** pysqlite (and so aiosqlite) opens its own,
+      which breaks SAVEPOINT - and `services.base.insert_or_get` relies on
+      savepoints for its race-safe insert.
+    * **`BEGIN IMMEDIATE` rather than the default deferred begin.** A deferred
+      transaction takes a read lock and upgrades to a write lock when it first
+      writes, and SQLite refuses that upgrade with SQLITE_BUSY *without
+      consulting the busy timeout*, because waiting there could deadlock. Every
+      transaction in this application reads before it writes, so two workers
+      running at once hit it immediately and the timeout above never gets a
+      say. IMMEDIATE takes the write lock up front, which is a case the busy
+      handler does wait on, so concurrent workers serialise instead of failing.
+      PostgreSQL needs none of this: MVCC and row-level locks give the same
+      outcome at a much finer grain.
+    """
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _disable_implicit_begin(dbapi_connection: Any, _record: Any) -> None:
+        dbapi_connection.isolation_level = None
+
+    @event.listens_for(engine.sync_engine, "begin")
+    def _begin_immediate(connection: Any) -> None:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
 
 
 def get_engine() -> AsyncEngine:
@@ -52,6 +90,8 @@ def get_engine() -> AsyncEngine:
     if _engine is None:
         settings = get_settings()
         _engine = create_async_engine(settings.database_url, **_engine_kwargs(settings))
+        if settings.database_url.startswith("sqlite"):
+            configure_sqlite(_engine)
     return _engine
 
 

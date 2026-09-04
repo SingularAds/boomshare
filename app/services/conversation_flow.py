@@ -45,7 +45,7 @@ from app.domain import (
 )
 from app.integrations.meta.client import MetaClient, get_meta_client
 from app.integrations.meta.schemas import InboundMessageEvent, LeadgenEvent, MessageStatusEvent
-from app.models import AiDecisionLog, Conversation, Customer, Lead
+from app.models import AiDecisionLog, Conversation, Customer, Lead, Message
 from app.services import (
     attribution,
     conversations as conversation_service,
@@ -190,19 +190,45 @@ async def already_answered(session: AsyncSession, inbound_message_id: uuid.UUID)
     return row is not None
 
 
-async def reply_to_inbound(session: AsyncSession, context: InboundContext) -> None:
-    """Transaction 2 - ask the model, validate, act, send."""
-    settings = get_settings()
+@dataclass(slots=True)
+class ReplyInputs:
+    """Everything the model reasons over, read in one transaction.
 
+    The rows here are detached once that transaction closes. That is safe to
+    read - the session factory sets `expire_on_commit=False`, so loaded
+    attributes survive the commit - and it is deliberately *not* safe to write:
+    anything the decision mutates is re-read in `apply_reply` against a live
+    session. Keeping the two apart is what lets the model call happen with no
+    database connection checked out.
+    """
+
+    conversation: Conversation
+    customer: Customer
+    history: list[Message]
+    lead: Lead | None
+    link_sent: bool
+    within_window: bool
+    objective: str | None
+    previous_reply: str | None
+
+
+async def load_reply_inputs(
+    session: AsyncSession, context: InboundContext
+) -> ReplyInputs | None:
+    """Transaction 2a - read the state the model needs. No external calls.
+
+    Returns `None` when there is nothing to answer, which is not a failure: the
+    caller simply stops.
+    """
     conversation = await session.get(Conversation, context.conversation_id)
     customer = await session.get(Customer, context.customer_id)
     if conversation is None or customer is None:  # pragma: no cover - defensive
-        return
+        return None
 
     if await already_answered(session, context.message_id):
         trace("skip", "this message was already answered - not replying twice")
         logger.info("inbound message already answered", extra={"message_id": str(context.message_id)})
-        return
+        return None
 
     history = await conversation_service.load_history(session, conversation.id)
     link_sent = await download_service.has_link_been_sent(session, customer.id)
@@ -227,14 +253,88 @@ async def reply_to_inbound(session: AsyncSession, context: InboundContext) -> No
         replies_sent=replies_sent,
     )
 
-    result = await agent.generate_reply(
+    return ReplyInputs(
+        conversation=conversation,
+        customer=customer,
+        history=history,
+        lead=lead,
+        link_sent=link_sent,
+        within_window=in_window,
+        objective=objective,
+        # Answering a question is worth doing even with a repeated sentence, so
+        # this only records the evidence here. On an unprompted check-in the
+        # same signal suppresses the send instead - see `_apply_decision`.
+        previous_reply=_last_outbound_text(history),
+    )
+
+
+async def apply_reply(
+    session: AsyncSession,
+    context: InboundContext,
+    inputs: ReplyInputs,
+    result: agent.AgentResult,
+) -> None:
+    """Transaction 2b - act on the decision and send.
+
+    The rows are re-read here rather than reused from `inputs`: those are
+    detached, and everything below writes to them.
+    """
+    settings = get_settings()
+
+    conversation = await session.get(Conversation, context.conversation_id)
+    customer = await session.get(Customer, context.customer_id)
+    if conversation is None or customer is None:  # pragma: no cover - defensive
+        return
+
+    # Re-checked against live state. The model call happens between the two
+    # transactions, so this is the window in which another worker could have
+    # answered the same message - narrow, and already covered by the
+    # conversation lock, but the check costs one indexed read and being wrong
+    # costs the customer the same answer twice.
+    if await already_answered(session, context.message_id):
+        trace("skip", "answered while the model was thinking - not replying twice")
+        logger.info(
+            "inbound message answered concurrently",
+            extra={"message_id": str(context.message_id)},
+        )
+        return
+
+    await _apply_decision(
+        session,
         conversation,
         customer,
-        history,
-        download_link_sent=link_sent,
-        within_service_window=in_window,
-        directive=objective,
-        lead=lead,
+        result,
+        inbound_message_id=context.message_id,
+        link_already_sent=inputs.link_sent,
+        max_reply_characters=settings.max_reply_characters,
+        previous_reply=inputs.previous_reply,
+    )
+
+
+async def reply_to_inbound(context: InboundContext) -> None:
+    """Ask the model, then act on what it said.
+
+    Deliberately three steps, with the model call in the middle and *no database
+    connection held across it*. The pool is small (`db_pool_size`), a model call
+    is seconds long, and the previous single-transaction version meant every
+    in-flight reply occupied a connection for its whole duration - so a handful
+    of simultaneous customers could exhaust the pool and leave the webhook
+    endpoint itself blocking on checkout.
+    """
+    async with session_scope() as session:
+        inputs = await load_reply_inputs(session, context)
+
+    if inputs is None:
+        return
+
+    result = await agent.generate_reply(
+        inputs.conversation,
+        inputs.customer,
+        inputs.history,
+        download_link_sent=inputs.link_sent,
+        within_service_window=inputs.within_window,
+        directive=inputs.objective,
+        lead=inputs.lead,
     )
 
     if result is None:
@@ -243,19 +343,8 @@ async def reply_to_inbound(session: AsyncSession, context: InboundContext) -> No
         # retried rather than inventing a reply.
         raise RetryableError("ai did not return a usable decision")
 
-    await _apply_decision(
-        session,
-        conversation,
-        customer,
-        result,
-        inbound_message_id=context.message_id,
-        link_already_sent=link_sent,
-        max_reply_characters=settings.max_reply_characters,
-        # Answering a question is worth doing even with a repeated sentence, so
-        # this only records the evidence here. On an unprompted check-in the
-        # same signal suppresses the send instead - see `_apply_decision`.
-        previous_reply=_last_outbound_text(history),
-    )
+    async with session_scope() as session:
+        await apply_reply(session, context, inputs, result)
 
 
 def _start_read_receipt(context: InboundContext) -> asyncio.Task | None:
@@ -313,14 +402,19 @@ async def handle_inbound_message(event: InboundMessageEvent) -> None:
             logger.warning("inbound rate limit hit", extra={"wa_id": event.wa_id})
             return
 
-        # Two messages arriving together must not produce two overlapping replies.
+        # Two messages arriving together must not produce two overlapping
+        # replies. The second one now queues behind the first rather than
+        # failing: giving up here parks the job, burns one of
+        # `worker_max_attempts`, and leaves the customer waiting for a sweep to
+        # answer a message we could have answered seconds later.
         async with redis_helper.lock(
-            f"conversation:{context.conversation_id}", settings.ai_reply_lock_seconds
+            f"conversation:{context.conversation_id}",
+            settings.ai_reply_lock_seconds,
+            wait_seconds=settings.ai_reply_lock_wait_seconds,
         ) as acquired:
             if not acquired:
                 raise RetryableError("conversation is already being answered")
-            async with session_scope() as session:
-                await reply_to_inbound(session, context)
+            await reply_to_inbound(context)
     finally:
         if receipt is not None:
             try:

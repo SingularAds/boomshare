@@ -91,6 +91,14 @@ class Settings(BaseSettings):
     service_window_hours: int = 24
     history_message_limit: int = 20
     ai_reply_lock_seconds: int = 30
+    # How long a turn will queue behind the worker that already holds this
+    # conversation, instead of giving up. Giving up is expensive: the job is
+    # parked as `failed`, it burns one of `worker_max_attempts`, and nothing
+    # retries it until the sweep - so a customer who sent two messages in quick
+    # succession waited `webhook_sweep_after_seconds` for the second answer.
+    # Comfortably shorter than `ai_reply_lock_seconds`, so a lock whose holder
+    # died is waited out by its TTL rather than by this.
+    ai_reply_lock_wait_seconds: float = 20.0
     inbound_rate_limit_per_minute: int = 20
     # Automatic check-ins when a live conversation ends a turn with nothing
     # queued: one entry per unanswered nudge, and the length of the list is the
@@ -103,6 +111,13 @@ class Settings(BaseSettings):
     # ---- worker ----------------------------------------------------------
     run_embedded_worker: bool = True
     worker_queue_name: str = "boomshare:jobs"
+    # How many jobs one worker runs at a time. The pipeline is almost entirely
+    # waiting - on OpenAI, on the Graph API, on the database - so a serial
+    # consumer left one customer queued behind another's model call for no
+    # reason. Replies to the *same* conversation still serialise, on the Redis
+    # lock; this only lets unrelated conversations overlap. Keep it at or below
+    # `db_pool_size` so a full batch cannot outnumber the connection pool.
+    worker_concurrency: int = 4
     worker_poll_interval_seconds: float = 1.0
     worker_batch_size: int = 20
     worker_max_attempts: int = 5

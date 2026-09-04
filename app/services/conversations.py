@@ -214,13 +214,43 @@ async def record_outbound_message(
     return message
 
 
+#: How far along a message is. A receipt may only move a message forward
+#: through this order, never back. Meta sends `sent`, `delivered` and `read` as
+#: three separate webhooks, and nothing guarantees we finish processing them in
+#: the order they were sent - two of them can be in flight at once. Without this
+#: a late `sent` receipt would demote a message the customer had already read.
+#: `failed` ranks highest because it is terminal: Meta sends it *instead of*
+#: delivery, and a stray receipt must not clear it.
+_DELIVERY_PROGRESS = {
+    MessageStatus.RECEIVED: 0,
+    MessageStatus.QUEUED: 1,
+    MessageStatus.SENT: 2,
+    MessageStatus.DELIVERED: 3,
+    MessageStatus.READ: 4,
+    MessageStatus.FAILED: 5,
+}
+
+#: The receipt names Meta uses, mapped to what they mean for a message.
+_RECEIPT_STATUS = {
+    "sent": MessageStatus.SENT,
+    "delivered": MessageStatus.DELIVERED,
+    "read": MessageStatus.READ,
+    "failed": MessageStatus.FAILED,
+}
+
+
 async def apply_delivery_status(
     session: AsyncSession,
     provider_message_id: str,
     status: str,
     errors: list[dict] | None = None,
 ) -> Message | None:
-    """Update a sent message from a WhatsApp delivery receipt."""
+    """Update a sent message from a WhatsApp delivery receipt.
+
+    Applying a receipt is idempotent and order-independent: the timestamps are
+    only ever written once, and the status only ever moves forward through
+    `_DELIVERY_PROGRESS`.
+    """
     message = (
         await session.execute(
             select(Message).where(Message.provider_message_id == provider_message_id)
@@ -229,21 +259,28 @@ async def apply_delivery_status(
     if message is None:
         return None
 
+    incoming = _RECEIPT_STATUS.get(status)
+    if incoming is None:
+        # A receipt we do not model (Meta adds them from time to time). Storing
+        # nothing is right; the message keeps the state we already knew.
+        return message
+
     now = utcnow()
-    match status:
-        case "sent":
-            message.status = MessageStatus.SENT
-        case "delivered":
-            message.status = MessageStatus.DELIVERED
-            message.delivered_at = message.delivered_at or now
-        case "read":
-            message.status = MessageStatus.READ
-            message.read_at = message.read_at or now
-        case "failed":
-            message.status = MessageStatus.FAILED
-            message.error = {"errors": errors or []}
-        case _:
-            return message
+    # Timestamps are facts about what happened and are recorded whatever order
+    # the receipts arrive in. `or now` keeps the first one we were told.
+    if incoming is MessageStatus.DELIVERED:
+        message.delivered_at = message.delivered_at or now
+    elif incoming is MessageStatus.READ:
+        message.read_at = message.read_at or now
+        # A message that was read was necessarily delivered, even if that
+        # receipt is still in flight or was never sent.
+        message.delivered_at = message.delivered_at or now
+    elif incoming is MessageStatus.FAILED:
+        message.error = {"errors": errors or []}
+
+    current = _DELIVERY_PROGRESS.get(message.status, 0)
+    if _DELIVERY_PROGRESS[incoming] > current:
+        message.status = incoming
 
     await session.flush()
     return message

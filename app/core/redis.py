@@ -12,6 +12,8 @@ The job queue lives in `app.worker.queue` and also uses this client.
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -74,12 +76,25 @@ async def idempotency_guard(key: str, ttl_seconds: int = 900) -> bool:
 
 
 @asynccontextmanager
-async def lock(name: str, ttl_seconds: int = 30) -> AsyncIterator[bool]:
+async def lock(
+    name: str,
+    ttl_seconds: int = 30,
+    *,
+    wait_seconds: float = 0.0,
+    poll_seconds: float = 0.25,
+) -> AsyncIterator[bool]:
     """Best-effort mutual exclusion. Yields False when the lock is already held.
 
     Deliberately not a correctness mechanism. It exists so two workers do not
     reply to the same conversation at once; the things that must be exactly-once
     (messages, leads, reminders) are protected by database constraints instead.
+
+    `wait_seconds` turns "is it free right now?" into "is it free within the next
+    N seconds?". The default of 0 keeps the single-attempt behaviour every
+    existing caller relies on. A caller that passes a budget is saying it would
+    rather queue behind the current holder than fail - which for a customer's
+    second message is the difference between waiting a few seconds and waiting
+    for a sweep.
 
     Release checks the token before deleting so a lock that already expired is
     not stolen from its next holder. The check and the delete are two round
@@ -90,8 +105,15 @@ async def lock(name: str, ttl_seconds: int = 30) -> AsyncIterator[bool]:
     token = uuid.uuid4().hex
     key = f"lock:{name}"
     acquired = False
+    deadline = time.monotonic() + max(wait_seconds, 0.0)
     try:
-        acquired = bool(await get_redis().set(key, token, nx=True, ex=ttl_seconds))
+        while True:
+            acquired = bool(await get_redis().set(key, token, nx=True, ex=ttl_seconds))
+            if acquired or time.monotonic() >= deadline:
+                break
+            # Sleep no longer than the budget that is left, so a caller never
+            # waits meaningfully past the deadline it asked for.
+            await asyncio.sleep(min(poll_seconds, max(deadline - time.monotonic(), 0.0)))
     except Exception as exc:  # noqa: BLE001
         logger.warning("lock unavailable, proceeding without", extra={"error": str(exc)})
         acquired = True
