@@ -77,8 +77,14 @@ class Settings(BaseSettings):
     openai_max_output_tokens: int = 700
 
     # ---- internal auth ---------------------------------------------------
-    # Used by the Boomshare desktop app / admin tooling to call back into us.
+    # Two secrets, because they are held by different people. The Boomshare
+    # desktop backend needs to report installs, so this one leaves our estate -
+    # and everything it unlocks is idempotent and confined to one customer.
     internal_api_token: SecretStr = SecretStr("")
+    # The operator console reads every transcript, sends messages as us, and
+    # can delete the database. It is never shared outside the team, so it must
+    # not be the same string as the one we hand to a partner.
+    admin_api_token: SecretStr = SecretStr("")
 
     # ---- product ---------------------------------------------------------
     download_base_url: str = "https://boomshare.ai/download"
@@ -169,6 +175,7 @@ class Settings(BaseSettings):
             "WHATSAPP_PHONE_NUMBER_IDS": self.default_phone_number_id,
             "OPENAI_API_KEY": self.openai_api_key.get_secret_value(),
             "INTERNAL_API_TOKEN": self.internal_api_token.get_secret_value(),
+            "ADMIN_API_TOKEN": self.admin_api_token.get_secret_value(),
         }
         missing = sorted(name for name, value in required.items() if not value)
         if self.database_url == _DEFAULT_DATABASE_URL:

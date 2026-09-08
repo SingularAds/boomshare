@@ -14,7 +14,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai import knowledge
-from app.api.deps import require_internal_token
+from app.api.deps import require_admin_token
 from app.api.schemas import (
     AgentEffectivenessOut,
     AgentMessageRequest,
@@ -41,7 +41,7 @@ from app.services import conversations as conversation_service, messaging
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_internal_token)])
+router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin_token)])
 
 
 #: Stages that mean the customer was actually handed a link.

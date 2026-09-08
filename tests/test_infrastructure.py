@@ -443,7 +443,7 @@ class TestPromptFiles:
 
     async def test_prompts_can_be_reloaded_without_a_restart(self, client):
         response = await client.post(
-            "/admin/prompts/reload", headers={"X-Internal-Token": "test-internal-token"}
+            "/admin/prompts/reload", headers={"X-Admin-Token": "test-admin-token"}
         )
         assert response.status_code == 202
 

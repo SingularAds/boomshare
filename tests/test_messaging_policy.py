@@ -18,6 +18,7 @@ from tests.fakes import meta_bad_request, meta_rate_limited
 from tests.helpers import drain_queue
 
 AUTH = {"X-Internal-Token": "test-internal-token"}
+ADMIN_AUTH = {"X-Admin-Token": "test-admin-token"}
 
 
 async def post(client, **kwargs):
@@ -229,7 +230,7 @@ class TestHumanMessagesFollowTheSameRules:
         response = await client.post(
             f"/admin/conversations/{conversation.id}/messages",
             json={"body": "Following up personally", "agent": "sam"},
-            headers=AUTH,
+            headers=ADMIN_AUTH,
         )
 
         assert response.status_code == 200
@@ -250,7 +251,7 @@ class TestHumanMessagesFollowTheSameRules:
         response = await client.post(
             f"/admin/conversations/{conversation.id}/messages",
             json={"body": "just one more thing"},
-            headers=AUTH,
+            headers=ADMIN_AUTH,
         )
         assert response.status_code == 502
         assert "opted out" in response.json()["detail"]

@@ -11,6 +11,7 @@ from tests.factories import signed, whatsapp_message_payload
 from tests.helpers import drain_queue
 
 AUTH = {"X-Internal-Token": "test-internal-token"}
+ADMIN_AUTH = {"X-Admin-Token": "test-admin-token"}
 
 
 async def post(client, **kwargs):
@@ -107,7 +108,7 @@ class TestOperatorHandoff:
         response = await client.post(
             f"/admin/conversations/{conversation_id}/handoff",
             json={"reason": "high value account", "agent": "sam@boomshare.ai"},
-            headers=AUTH,
+            headers=ADMIN_AUTH,
         )
         assert response.status_code == 200
         assert response.json()["handling_mode"] == "human"
@@ -125,12 +126,12 @@ class TestOperatorHandoff:
         await client.post(
             f"/admin/conversations/{conversation_id}/handoff",
             json={"reason": "taking over"},
-            headers=AUTH,
+            headers=ADMIN_AUTH,
         )
         response = await client.post(
             f"/admin/conversations/{conversation_id}/messages",
             json={"body": "Hi, Sam here from Boomshare.", "agent": "sam@boomshare.ai"},
-            headers=AUTH,
+            headers=ADMIN_AUTH,
         )
 
         assert response.status_code == 200
@@ -146,10 +147,10 @@ class TestOperatorHandoff:
         await client.post(
             f"/admin/conversations/{conversation_id}/handoff",
             json={"reason": "checking"},
-            headers=AUTH,
+            headers=ADMIN_AUTH,
         )
         response = await client.post(
-            f"/admin/conversations/{conversation_id}/release", json={}, headers=AUTH
+            f"/admin/conversations/{conversation_id}/release", json={}, headers=ADMIN_AUTH
         )
         assert response.status_code == 200
         assert response.json()["handling_mode"] == "ai"
@@ -168,7 +169,7 @@ class TestOperatorHandoff:
             response = await client.post(
                 f"/admin/conversations/{conversation_id}/handoff",
                 json={"reason": "again"},
-                headers=AUTH,
+                headers=ADMIN_AUTH,
             )
             assert response.status_code == 200
 
@@ -180,7 +181,7 @@ class TestOperatorHandoff:
         await drain_queue()
         conversation_id = await self._conversation_id(db)
 
-        response = await client.get(f"/admin/conversations/{conversation_id}", headers=AUTH)
+        response = await client.get(f"/admin/conversations/{conversation_id}", headers=ADMIN_AUTH)
         body = response.json()
 
         assert response.status_code == 200
@@ -195,11 +196,11 @@ class TestOperatorHandoff:
         await client.post(
             f"/admin/conversations/{conversation_id}/handoff",
             json={"reason": "x"},
-            headers=AUTH,
+            headers=ADMIN_AUTH,
         )
 
-        human = await client.get("/admin/conversations?handling_mode=human", headers=AUTH)
-        ai_handled = await client.get("/admin/conversations?handling_mode=ai", headers=AUTH)
+        human = await client.get("/admin/conversations?handling_mode=human", headers=ADMIN_AUTH)
+        ai_handled = await client.get("/admin/conversations?handling_mode=ai", headers=ADMIN_AUTH)
 
         assert len(human.json()) == 1
         assert ai_handled.json() == []
@@ -217,6 +218,6 @@ class TestAdminAuth:
 
     async def test_unknown_conversation_is_404(self, client):
         response = await client.get(
-            "/admin/conversations/11111111-1111-1111-1111-111111111111", headers=AUTH
+            "/admin/conversations/11111111-1111-1111-1111-111111111111", headers=ADMIN_AUTH
         )
         assert response.status_code == 404

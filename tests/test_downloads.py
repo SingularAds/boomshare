@@ -11,6 +11,7 @@ from tests.factories import signed, whatsapp_message_payload
 from tests.helpers import drain_queue
 
 AUTH = {"X-Internal-Token": "test-internal-token"}
+ADMIN_AUTH = {"X-Admin-Token": "test-admin-token"}
 
 
 async def post(client, **kwargs):
@@ -192,7 +193,7 @@ class TestFunnelReport:
             "/internal/events/activation", json={"token": link.token}, headers=AUTH
         )
 
-        response = await client.get("/admin/reports/funnel", headers=AUTH)
+        response = await client.get("/admin/reports/funnel", headers=ADMIN_AUTH)
         assert response.status_code == 200
 
         row = response.json()[0]
@@ -264,7 +265,7 @@ class TestAgentEffectivenessReport:
         # One turn that actually advances the sale.
         await send_link(client, ai)
 
-        response = await client.get("/admin/reports/agent", headers=AUTH)
+        response = await client.get("/admin/reports/agent", headers=ADMIN_AUTH)
         assert response.status_code == 200
         report = response.json()
 
@@ -276,7 +277,7 @@ class TestAgentEffectivenessReport:
         assert report["median_turns_to_link"] == 2
 
     async def test_it_reports_zero_rather_than_dividing_by_nothing(self, client):
-        response = await client.get("/admin/reports/agent", headers=AUTH)
+        response = await client.get("/admin/reports/agent", headers=ADMIN_AUTH)
         assert response.status_code == 200
         report = response.json()
         assert report["ai_turns"] == 0
@@ -368,3 +369,201 @@ class TestAnswerThenOfferThenSend:
 
         link = (await db.execute(select(DownloadLink))).scalar_one()
         assert link.url in meta.texts[0].body
+
+
+class TestPhoneResolution:
+    """A signup form takes whatever the user types, so the number rarely comes
+    back in the `wa_id` form WhatsApp gave us."""
+
+    async def test_a_number_without_its_country_code_still_resolves(
+        self, client, db, ai, meta
+    ):
+        await post(client, text="hi")
+        await drain_queue()
+
+        response = await client.post(
+            "/internal/events/activation", json={"phone": "9876543210"}, headers=AUTH
+        )
+        assert response.status_code == 200
+        assert response.json()["applied"] is True
+
+        customer = (await db.execute(select(Customer))).scalar_one()
+        assert customer.activated_at is not None
+
+    async def test_a_number_in_national_form_still_resolves(self, client, db, ai, meta):
+        await post(client, text="hi")
+        await drain_queue()
+
+        response = await client.post(
+            "/internal/events/download", json={"phone": "0 98765 43210"}, headers=AUTH
+        )
+        assert response.status_code == 200
+
+        customer = (await db.execute(select(Customer))).scalar_one()
+        assert customer.downloaded_at is not None
+
+    async def test_an_ambiguous_suffix_is_refused_rather_than_guessed(
+        self, client, db, ai, meta
+    ):
+        """Two people sharing a tail is exactly when a guess picks the wrong one."""
+        await post(client, text="hi")
+        await drain_queue()
+
+        async def add_lookalike(session):
+            session.add(Customer(phone="449876543210", wa_id="449876543210"))
+
+        await db.write(add_lookalike)
+
+        response = await client.post(
+            "/internal/events/download", json={"phone": "9876543210"}, headers=AUTH
+        )
+        assert response.status_code == 404
+
+        for customer in (await db.execute(select(Customer))).scalars():
+            assert customer.downloaded_at is None
+
+    async def test_a_suffix_too_short_to_identify_anyone_is_refused(
+        self, client, db, ai, meta
+    ):
+        await post(client, text="hi")
+        await drain_queue()
+
+        response = await client.post(
+            "/internal/events/download", json={"phone": "543210"}, headers=AUTH
+        )
+        assert response.status_code == 404
+
+    async def test_an_unmatched_install_writes_nothing(self, client, db, ai, meta):
+        """Most installs are somebody else's - they must not leave a trace."""
+        await post(client, text="hi")
+        await drain_queue()
+
+        response = await client.post(
+            "/internal/events/download", json={"phone": "+1 555 010 9999"}, headers=AUTH
+        )
+        assert response.status_code == 404
+
+        customer = (await db.execute(select(Customer))).scalar_one()
+        assert customer.downloaded_at is None
+
+
+class TestEventDetails:
+    async def test_absent_fields_are_not_written_as_nulls(self, client, db, ai, meta):
+        """A null would erase a platform an earlier event had already recorded."""
+        await send_link(client, ai)
+        link = (await db.execute(select(DownloadLink))).scalar_one()
+
+        await client.post(
+            "/internal/events/download",
+            json={"token": link.token, "platform": "windows", "app_version": "1.4.2"},
+            headers=AUTH,
+        )
+        await client.post(
+            "/internal/events/activation", json={"token": link.token}, headers=AUTH
+        )
+
+        stored = await db.get(DownloadLink, link.id)
+        assert stored.details["platform"] == "windows"
+        assert stored.details["app_version"] == "1.4.2"
+        assert None not in stored.details.values()
+
+
+class TestClickReporting:
+    async def test_only_the_first_click_is_applied(self, client, db, ai, meta):
+        """The page may report on every load; the moment they followed the link
+        happened once."""
+        await send_link(client, ai)
+        link = (await db.execute(select(DownloadLink))).scalar_one()
+
+        first = await client.post(
+            "/internal/events/click", json={"token": link.token}, headers=AUTH
+        )
+        assert first.status_code == 200
+        assert first.json()["applied"] is True
+
+        clicked_at = (await db.get(DownloadLink, link.id)).clicked_at
+        assert clicked_at is not None
+
+        second = await client.post(
+            "/internal/events/click", json={"token": link.token}, headers=AUTH
+        )
+        assert second.status_code == 200
+        assert second.json()["applied"] is False
+        assert second.json()["detail"] == "already recorded"
+
+        assert (await db.get(DownloadLink, link.id)).clicked_at == clicked_at
+
+    async def test_an_unknown_token_is_rejected(self, client, db, ai, meta):
+        response = await client.post(
+            "/internal/events/click", json={"token": "never-issued"}, headers=AUTH
+        )
+        assert response.status_code == 404
+
+    async def test_a_longer_number_that_merely_ends_the_same_is_not_matched(
+        self, client, db, ai, meta
+    ):
+        """Customers span Portugal, the US and Brazil. Only a country code may
+        sit in front of the national number - anything longer is a coincidence."""
+
+        async def add_unrelated(session):
+            # Ends with the same ten digits, but with five digits in front of
+            # them rather than a country code.
+            session.add(Customer(phone="123459876543210", wa_id="123459876543210"))
+
+        await db.write(add_unrelated)
+
+        response = await client.post(
+            "/internal/events/download", json={"phone": "9876543210"}, headers=AUTH
+        )
+        assert response.status_code == 404
+
+    async def test_the_same_national_number_in_another_country_is_ambiguous(
+        self, client, db, ai, meta
+    ):
+        """+91 98765 43210 and +55 98765 43210 are two people, not one."""
+        await post(client, text="hi")
+        await drain_queue()
+
+        async def add_brazilian(session):
+            session.add(Customer(phone="559876543210", wa_id="559876543210"))
+
+        await db.write(add_brazilian)
+
+        response = await client.post(
+            "/internal/events/download", json={"phone": "9876543210"}, headers=AUTH
+        )
+        assert response.status_code == 404
+
+        for customer in (await db.execute(select(Customer))).scalars():
+            assert customer.downloaded_at is None
+
+
+class TestTokenSeparation:
+    """The internal secret is held by a partner. The admin console is not."""
+
+    async def test_the_partner_secret_cannot_reach_the_admin_api(self, client):
+        response = await client.get("/admin/reports/funnel", headers=AUTH)
+        assert response.status_code == 401
+
+    async def test_the_partner_secret_cannot_delete_data(self, client, db, ai, meta):
+        await post(client, text="hi")
+        await drain_queue()
+
+        response = await client.post("/admin/reset", headers=AUTH)
+        assert response.status_code == 401
+
+        assert (await db.execute(select(func.count()).select_from(Customer))).scalar_one() == 1
+
+    async def test_the_admin_secret_cannot_report_installs(self, client, db, ai, meta):
+        await post(client, text="hi")
+        await drain_queue()
+
+        response = await client.post(
+            "/internal/events/download",
+            json={"phone": "+91 98765 43210"},
+            headers=ADMIN_AUTH,
+        )
+        assert response.status_code == 401
+
+        customer = (await db.execute(select(Customer))).scalar_one()
+        assert customer.downloaded_at is None

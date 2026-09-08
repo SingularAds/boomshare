@@ -96,9 +96,9 @@ python scripts/send_webhook.py leadgen
 Then look at what happened:
 
 ```bash
-curl -H "X-Internal-Token: $INTERNAL_API_TOKEN" localhost:8000/admin/conversations
-curl -H "X-Internal-Token: $INTERNAL_API_TOKEN" localhost:8000/admin/reports/funnel
-curl -H "X-Internal-Token: $INTERNAL_API_TOKEN" localhost:8000/admin/reports/agent
+curl -H "X-Admin-Token: $ADMIN_API_TOKEN" localhost:8000/admin/conversations
+curl -H "X-Admin-Token: $ADMIN_API_TOKEN" localhost:8000/admin/reports/funnel
+curl -H "X-Admin-Token: $ADMIN_API_TOKEN" localhost:8000/admin/reports/agent
 ```
 
 Step-by-step verification of every feature is in the
@@ -169,6 +169,7 @@ Every setting is environment-driven and documented inline in
 | `WHATSAPP_PHONE_NUMBER_IDS` | WhatsApp Manager → API Setup (the IDs, not the numbers). A JSON list, one per number you answer on; the first is the default sender |
 | `OPENAI_API_KEY` | platform.openai.com |
 | `INTERNAL_API_TOKEN` | `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `ADMIN_API_TOKEN` | `python -c "import secrets; print(secrets.token_urlsafe(32))"` — must differ from the internal one |
 | `DATABASE_URL` | Your PostgreSQL instance |
 | `REDIS_URL` | Your Redis instance |
 
@@ -229,6 +230,6 @@ Two markdown files, no code:
 Apply edits without a restart:
 
 ```bash
-curl -X POST -H "X-Internal-Token: $INTERNAL_API_TOKEN" \
+curl -X POST -H "X-Admin-Token: $ADMIN_API_TOKEN" \
   localhost:8000/admin/prompts/reload
 ```

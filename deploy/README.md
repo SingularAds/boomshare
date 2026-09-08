@@ -63,6 +63,7 @@ printf '%s' '<META_VERIFY_TOKEN>'  | gcloud secrets create META_VERIFY_TOKEN --d
 printf '%s' '<META_ACCESS_TOKEN>'  | gcloud secrets create META_ACCESS_TOKEN --data-file=-
 printf '%s' '<OPENAI_API_KEY>'     | gcloud secrets create OPENAI_API_KEY --data-file=-
 printf '%s' '<INTERNAL_API_TOKEN>' | gcloud secrets create INTERNAL_API_TOKEN --data-file=-
+printf '%s' '<ADMIN_API_TOKEN>'    | gcloud secrets create ADMIN_API_TOKEN --data-file=-
 
 # 4. Let the Cloud Run runtime service account read secrets and reach Cloud SQL.
 SA="$(gcloud iam service-accounts list --filter='displayName:Compute Engine default' --format='value(email)')"

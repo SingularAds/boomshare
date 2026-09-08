@@ -29,6 +29,26 @@ router = APIRouter(
 )
 
 
+def _phone_hint(phone: str | None) -> str | None:
+    """Enough of a number to correlate a miss in the logs, not enough to be PII."""
+    digits = customer_service.normalise_phone(phone or "")
+    return f"...{digits[-4:]}" if len(digits) >= 4 else None
+
+
+def _event_details(event: InstallEvent) -> dict:
+    """Only what Boomshare actually sent.
+
+    The fields are merged into whatever the link already carries, so passing a
+    `None` through would erase a platform an earlier event had recorded.
+    """
+    details = {
+        "platform": event.platform,
+        "app_version": event.app_version,
+        **(event.details or {}),
+    }
+    return {key: value for key, value in details.items() if value is not None}
+
+
 async def _resolve_customer(session: AsyncSession, event: InstallEvent) -> Customer:
     if not event.has_identifier():
         raise HTTPException(
@@ -44,10 +64,19 @@ async def _resolve_customer(session: AsyncSession, event: InstallEvent) -> Custo
                 return customer
 
     if event.phone:
-        customer = await customer_service.get_by_phone(session, event.phone)
+        customer = await customer_service.resolve_by_phone(session, event.phone)
         if customer is not None:
             return customer
 
+    # Most installs are not ours - somebody who found Boomshare without ever
+    # seeing an ad reports here too, and correctly matches nothing. The miss
+    # rate is the health signal for the whole chain, so it has to be visible:
+    # a token that misses means the link tracking broke, and a sudden fall in
+    # matched phones means the installer stopped carrying the ref.
+    logger.info(
+        "install event did not match a customer",
+        extra={"token": event.token, "phone_hint": _phone_hint(event.phone)},
+    )
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown customer")
 
 
@@ -58,10 +87,7 @@ async def report_download(
     """Confirmed install. Idempotent - a repeat report changes nothing."""
     customer = await _resolve_customer(session, event)
     applied = await download_service.register_download(
-        session,
-        customer,
-        token=event.token,
-        details={"platform": event.platform, "app_version": event.app_version, **(event.details or {})},
+        session, customer, token=event.token, details=_event_details(event)
     )
     return EventAck(
         applied=applied,
@@ -77,10 +103,7 @@ async def report_activation(
     """Confirmed activation. Implies the install, so it backfills it."""
     customer = await _resolve_customer(session, event)
     applied = await download_service.register_activation(
-        session,
-        customer,
-        token=event.token,
-        details={"platform": event.platform, "app_version": event.app_version, **(event.details or {})},
+        session, customer, token=event.token, details=_event_details(event)
     )
     return EventAck(
         applied=applied,
@@ -96,7 +119,12 @@ async def report_click(event: InstallEvent, session: AsyncSession = Depends(get_
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="token is required"
         )
-    link = await download_service.register_click(session, event.token)
+    link, first_click = await download_service.register_click(session, event.token)
     if link is None:
+        logger.info("click event for an unknown token", extra={"token": event.token})
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown token")
-    return EventAck(applied=True, customer_id=link.customer_id)
+    return EventAck(
+        applied=first_click,
+        customer_id=link.customer_id,
+        detail=None if first_click else "already recorded",
+    )

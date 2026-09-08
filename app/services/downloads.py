@@ -94,12 +94,24 @@ async def get_by_token(session: AsyncSession, token: str) -> DownloadLink | None
     ).scalar_one_or_none()
 
 
-async def register_click(session: AsyncSession, token: str) -> DownloadLink | None:
+async def register_click(
+    session: AsyncSession, token: str
+) -> tuple[DownloadLink | None, bool]:
+    """Record that the download page was opened.
+
+    Returns the link and whether this was its *first* click. Only the first is
+    recorded - a page that reports on every load would otherwise keep moving
+    `clicked_at` forward and lose the moment they actually followed the link.
+    """
     link = await get_by_token(session, token)
-    if link is not None and link.clicked_at is None:
-        link.clicked_at = utcnow()
-        await session.flush()
-    return link
+    if link is None:
+        return None, False
+    if link.clicked_at is not None:
+        return link, False
+
+    link.clicked_at = utcnow()
+    await session.flush()
+    return link, True
 
 
 async def register_download(
