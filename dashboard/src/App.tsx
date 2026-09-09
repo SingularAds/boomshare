@@ -257,30 +257,6 @@ export default function App() {
           </div>
         )}
 
-        {/* A number Meta routes to us that this deployment does not answer on.
-            Those customers messaged and got silence, so it leads the page. */}
-        {overview && overview.unanswerable_by_number.length > 0 && (
-          <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 shadow-xs dark:border-amber-900/60 dark:bg-amber-950/50 dark:text-amber-200">
-            <p className="font-bold">
-              Messages arrived on a WhatsApp number this deployment does not answer on
-            </p>
-            <p className="mt-1 text-[13px]">
-              They were stored but never replied to. Add the number to{" "}
-              <code className="rounded bg-amber-100 px-1 dark:bg-amber-900/60">
-                WHATSAPP_PHONE_NUMBER_IDS
-              </code>{" "}
-              if it is ours, then redeploy.
-            </p>
-            <ul className="mt-2 space-y-0.5 font-mono text-[12.5px]">
-              {overview.unanswerable_by_number.map((row) => (
-                <li key={row.key}>
-                  {row.key} — {row.count} {row.count === 1 ? "thread" : "threads"}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
         {/* Section 1: Executive KPI Cards */}
         {overview ? (
           <KpiRow

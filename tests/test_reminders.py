@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app.ai.schemas import AiDecision
 from app.core.clock import as_utc, utcnow
-from app.domain import HandlingMode, ReminderKind, ReminderStatus, SalesStage
+from app.domain import HandlingMode, MessageType, ReminderKind, ReminderStatus, SalesStage
 from app.models import AiDecisionLog, Conversation, Customer, Message, Reminder
 from app.services import reminders as reminder_service
 from tests.factories import signed, whatsapp_message_payload
@@ -285,6 +285,41 @@ class TestOutsideTheServiceWindow:
         updated = await db.get(Reminder, reminder.id)
         assert updated.status == ReminderStatus.SENT
         assert updated.resolution == "template follow-up"
+
+    async def test_the_stored_content_is_what_whatsapp_actually_showed_them(
+        self, client, db, ai, meta
+    ):
+        """The stored `content` is not a display nicety - `context.py` feeds it
+        straight back to the model as its own conversation history. A
+        placeholder there means the AI's next reply is generated believing it
+        said something it never sent."""
+        await start_conversation(client, ai)
+        reminder = (await db.execute(select(Reminder))).scalar_one()
+        await make_due(db, reminder.id)
+
+        async def _age_conversation(session):
+            conversation = (await session.execute(select(Conversation))).scalar_one()
+            conversation.last_inbound_at = utcnow() - timedelta(hours=30)
+
+        await db.write(_age_conversation)
+
+        from app.services.conversation_flow import send_follow_up
+
+        await send_follow_up(reminder.id)
+
+        from app.models import Message
+
+        sent = (
+            await db.execute(
+                select(Message).where(Message.message_type == MessageType.TEMPLATE)
+            )
+        ).scalar_one()
+
+        assert sent.content != "[follow-up template]"
+        assert "[" not in sent.content
+        # Matches the approved body in docs/meta-setup.md, {{1}} filled in.
+        assert sent.content.startswith("Hi ")
+        assert "just checking in about Boomshare" in sent.content
 
 
 class TestClaiming:

@@ -944,14 +944,25 @@ async def send_follow_up(reminder_id: uuid.UUID, client: MetaClient | None = Non
             )
             return
 
+        first_name = (customer.full_name or "there").split()[0]
         outcome = await messaging.send_template(
             session,
             conversation,
             customer,
             template_name=settings.whatsapp_followup_template_name,
             language=settings.whatsapp_followup_template_language,
-            body_parameters=[(customer.full_name or "there").split()[0]],
-            preview_text="[follow-up template]",
+            body_parameters=[first_name],
+            # The approved body of `boomshare_followup` (see docs/meta-setup.md),
+            # with {{1}} filled in exactly as WhatsApp rendered it for the
+            # customer. This becomes the message's stored `content` - it is what
+            # the dashboard shows in the thread, and what the AI reads back as
+            # its own conversation history on the next turn. A placeholder here
+            # is not a display nicety: the model would answer "what did you
+            # just say" having never seen its own words.
+            preview_text=(
+                f"Hi {first_name}, just checking in about Boomshare. "
+                "Still interested? Happy to help whenever suits."
+            ),
             client=client,
         )
         if not outcome.sent:
