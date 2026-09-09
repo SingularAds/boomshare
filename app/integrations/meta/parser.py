@@ -71,6 +71,7 @@ def _parse_whatsapp_change(value: dict[str, Any]) -> list[ParsedEvent]:
     events: list[ParsedEvent] = []
     metadata = value.get("metadata") or {}
     phone_number_id = metadata.get("phone_number_id")
+    display_phone_number = metadata.get("display_phone_number")
 
     # `contacts` carries the WhatsApp profile name for the sender.
     names: dict[str, str] = {}
@@ -100,6 +101,9 @@ def _parse_whatsapp_change(value: dict[str, Any]) -> list[ParsedEvent]:
                 provider_message_id=str(message_id),
                 wa_id=str(wa_id),
                 phone_number_id=str(phone_number_id) if phone_number_id else None,
+                display_phone_number=(
+                    str(display_phone_number) if display_phone_number else None
+                ),
                 profile_name=names.get(str(wa_id)),
                 message_type=str(message.get("type") or "text"),
                 text=extract_text(message),

@@ -83,6 +83,7 @@ async def get_or_create_open_conversation(
     customer: Customer,
     *,
     phone_number_id: str,
+    display_phone_number: str | None = None,
     channel: str = "whatsapp",
     lead_id: uuid.UUID | None = None,
 ) -> tuple[Conversation, bool]:
@@ -101,6 +102,10 @@ async def get_or_create_open_conversation(
     if existing is not None:
         if lead_id and existing.lead_id is None:
             existing.lead_id = lead_id
+        # Threads that predate the column, or that opened from a webhook
+        # without it, name themselves on the customer's next message.
+        if display_phone_number and not existing.display_phone_number:
+            existing.display_phone_number = display_phone_number
         return existing, False
 
     conversation, created = await insert_or_get(
@@ -111,6 +116,7 @@ async def get_or_create_open_conversation(
             "sales_stage": SalesStage.NEW,
             "stage_updated_at": utcnow(),
             "handling_mode": HandlingMode.AI,
+            "display_phone_number": display_phone_number,
         },
         customer_id=customer.id,
         channel=channel,

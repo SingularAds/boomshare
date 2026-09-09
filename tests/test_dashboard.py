@@ -157,7 +157,7 @@ class TestCustomerList:
         assert row["phone"] == "919876543210"
         assert row["source"] == "direct"
         assert row["campaign_name"] is None
-        assert row["numbers"] == ["Number 1"]
+        assert row["numbers"] == ["15550001111"]
         assert row["stage"] == "link_sent"
         assert row["messages"] > 0
         assert row["last_activity_at"] is not None
@@ -227,7 +227,7 @@ class TestCustomerList:
         page = (await client.get("/admin/dashboard/customers", headers=ADMIN_AUTH)).json()
         row = page["rows"][0]
         # Both of our numbers, in the order they first wrote to them.
-        assert row["numbers"] == ["Number 1", "Number 2"]
+        assert row["numbers"] == ["15550001111", "442079460002"]
         assert row["stage"] == "link_sent"
 
 
@@ -295,7 +295,7 @@ class TestWhichNumberTheyCameThrough:
         await drain_queue()
 
         page = (await client.get("/admin/dashboard/customers", headers=ADMIN_AUTH)).json()
-        assert page["rows"][0]["numbers"] == ["Number 2"]
+        assert page["rows"][0]["numbers"] == ["442079460002"]
 
     async def test_someone_who_wrote_to_both_shows_both(self, client, ai, meta):
         await post(client, text="first", phone_number_id="111222333")
@@ -304,7 +304,7 @@ class TestWhichNumberTheyCameThrough:
         await drain_queue()
 
         page = (await client.get("/admin/dashboard/customers", headers=ADMIN_AUTH)).json()
-        assert page["rows"][0]["numbers"] == ["Number 1", "Number 2"]
+        assert page["rows"][0]["numbers"] == ["15550001111", "442079460002"]
 
     async def test_the_profile_and_each_thread_name_the_number(self, client, db, ai, meta):
         from app.models import Customer
@@ -318,20 +318,57 @@ class TestWhichNumberTheyCameThrough:
                 f"/admin/dashboard/customers/{customer.id}", headers=ADMIN_AUTH
             )
         ).json()
-        assert body["numbers"] == ["Number 2"]
-        assert body["conversations"][0]["number_label"] == "Number 2"
+        assert body["numbers"] == ["442079460002"]
+        assert body["conversations"][0]["number_label"] == "442079460002"
         assert body["conversations"][0]["phone_number_id"] == "444555666"
 
-    async def test_a_configured_label_wins_over_the_position(self, client, ai, meta, monkeypatch):
-        """Once the real numbers are configured, operators see those instead."""
+    async def test_what_meta_reported_beats_hand_written_config(
+        self, client, ai, meta, monkeypatch
+    ):
+        """The number on the webhook is the number. Config is only a fallback.
+
+        A label map has to be edited whenever a number is added, and the moment
+        someone forgets, the dashboard is wrong. What Meta sent with the message
+        cannot go stale, so it wins.
+        """
         from app.core.config import get_settings
 
         settings = get_settings()
-        monkeypatch.setitem(settings.whatsapp_number_labels, "444555666", "+44 7700 900123")
+        monkeypatch.setitem(settings.whatsapp_number_labels, "444555666", "STALE CONFIG")
         try:
             await post(client, text="hi", phone_number_id="444555666")
             await drain_queue()
 
+            page = (
+                await client.get("/admin/dashboard/customers", headers=ADMIN_AUTH)
+            ).json()
+            assert page["rows"][0]["numbers"] == ["442079460002"]
+        finally:
+            settings.whatsapp_number_labels.pop("444555666", None)
+
+    async def test_config_still_names_a_thread_that_predates_the_column(
+        self, client, db, ai, meta, monkeypatch
+    ):
+        """Old threads never saw that webhook, so the fallback still matters."""
+        from app.core.config import get_settings
+        from app.models import Conversation
+
+        await post(client, text="hi", phone_number_id="444555666")
+        await drain_queue()
+
+        async def forget(session):
+            row = (
+                await session.execute(
+                    select(Conversation).where(Conversation.phone_number_id == "444555666")
+                )
+            ).scalar_one()
+            row.display_phone_number = None
+
+        await db.write(forget)
+
+        settings = get_settings()
+        monkeypatch.setitem(settings.whatsapp_number_labels, "444555666", "+44 7700 900123")
+        try:
             page = (
                 await client.get("/admin/dashboard/customers", headers=ADMIN_AUTH)
             ).json()
@@ -425,7 +462,8 @@ class TestUnansweredNumbers:
         await drain_queue()
 
         body = (await client.get("/admin/dashboard/overview", headers=ADMIN_AUTH)).json()
-        assert body["unanswerable_by_number"] == [{"key": "999888777", "count": 1}]
+        # Named by what Meta reported, not by the opaque id.
+        assert body["unanswerable_by_number"] == [{"key": "1555888777", "count": 1}]
 
         # The message is kept, and we stayed quiet rather than answering from
         # a number the customer never wrote to.

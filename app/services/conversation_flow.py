@@ -98,6 +98,7 @@ async def ingest_inbound(session: AsyncSession, event: InboundMessageEvent) -> I
         session,
         customer,
         phone_number_id=inbound_number,
+        display_phone_number=event.display_phone_number,
         lead_id=lead.id if lead else None,
     )
 

@@ -40,6 +40,10 @@ class InboundMessageEvent(BaseModel):
     provider_message_id: str
     wa_id: str
     phone_number_id: str | None = None
+    #: The same number as a person would dial it. Meta sends it beside the
+    #: id on every webhook, and it is the only place we ever learn it -
+    #: the Graph API is not consulted just to name a number we own.
+    display_phone_number: str | None = None
     profile_name: str | None = None
     message_type: str = "text"
     text: str | None = None

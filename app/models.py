@@ -235,6 +235,12 @@ class Conversation(Base, TimestampMixin):
     # would be answered from whichever number the config happened to list
     # first. Better to fail at the one place conversations are created.
     phone_number_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    # The same number as a person would dial it, learned from the webhook that
+    # opened this thread. Meta's id identifies a number; it does not name one,
+    # and an operator reading a transcript needs the name. Nullable because a
+    # thread opened before this column existed never saw that webhook, and
+    # because Meta is not obliged to send it.
+    display_phone_number: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[ConversationStatus] = mapped_column(
         _enum(ConversationStatus, "conversation_status"),
         nullable=False,

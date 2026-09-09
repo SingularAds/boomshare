@@ -20,6 +20,22 @@ def wamid() -> str:
     return f"wamid.HBgMTEST{next(_wamid):06d}"
 
 
+#: The readable number Meta reports for each id the tests use.
+_DISPLAY_NUMBERS = {
+    "111222333": "15550001111",
+    "444555666": "442079460002",
+}
+
+
+def _display_number(phone_number_id: str) -> str:
+    """What Meta would report alongside this id.
+
+    Unknown ids get a distinct number of their own rather than sharing one, so
+    a test cannot pass by coincidence when two numbers should differ.
+    """
+    return _DISPLAY_NUMBERS.get(phone_number_id, f"1555{phone_number_id[-6:]}")
+
+
 def whatsapp_message_payload(
     *,
     text: str = "I want to know more",
@@ -58,7 +74,10 @@ def whatsapp_message_payload(
                         "value": {
                             "messaging_product": "whatsapp",
                             "metadata": {
-                                "display_phone_number": "15550001111",
+                                # Meta sends the readable number beside the id.
+                                # Derived from the id so two of our numbers are
+                                # distinguishable, the way they are in reality.
+                                "display_phone_number": _display_number(phone_number_id),
                                 "phone_number_id": phone_number_id,
                             },
                             "contacts": contacts,

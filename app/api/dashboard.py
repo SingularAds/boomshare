@@ -133,11 +133,21 @@ def number_label(phone_number_id: str) -> str:
     return f"Retired ({phone_number_id[-4:]})"
 
 
+def thread_number(thread: Conversation) -> str:
+    """Name the number this thread is on, best source first.
+
+    What Meta told us when the thread opened beats anything configured by hand:
+    it is the number itself, it arrives on every webhook, and it stays correct
+    when a number is added without anyone remembering to update the config.
+    """
+    return thread.display_phone_number or number_label(thread.phone_number_id)
+
+
 def _numbers_written_to(threads: list[Conversation]) -> list[str]:
     """Every number this person has written to, first contact first."""
     seen: dict[str, None] = {}
     for thread in sorted(threads, key=lambda t: t.created_at):
-        seen.setdefault(number_label(thread.phone_number_id), None)
+        seen.setdefault(thread_number(thread), None)
     return list(seen)
 
 
@@ -268,7 +278,13 @@ async def overview(
         (
             await session.execute(
                 _excluding_tests(
-                    select(Conversation.phone_number_id, func.count(Conversation.id)),
+                    select(
+                    func.coalesce(
+                        func.max(Conversation.display_phone_number),
+                        Conversation.phone_number_id,
+                    ),
+                    func.count(Conversation.id),
+                ),
                     Conversation.customer_id,
                     exclude,
                 )
@@ -510,7 +526,7 @@ async def customer_detail(
                 handling_mode=thread.handling_mode,
                 sales_stage=thread.sales_stage,
                 phone_number_id=thread.phone_number_id,
-                number_label=number_label(thread.phone_number_id),
+                number_label=thread_number(thread),
                 created_at=thread.created_at,
                 last_inbound_at=thread.last_inbound_at,
                 last_outbound_at=thread.last_outbound_at,
