@@ -1,3 +1,14 @@
+# The dashboard is a React app compiled to static assets. It is built here and
+# copied into the Python image, so the runtime carries no Node at all.
+FROM node:24-slim AS dashboard
+
+WORKDIR /build
+COPY dashboard/package.json dashboard/package-lock.json ./
+RUN npm ci
+COPY dashboard/ ./
+RUN npm run build
+
+
 # Single image, two entrypoints: the API and the worker run the same code with
 # different commands (see docker-compose.yml). Keeps deploys simple and makes
 # it impossible for the two to drift apart.
@@ -23,6 +34,8 @@ RUN pip install -r requirements.txt \
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY app ./app
+# Built by the `dashboard` stage above; served from /dashboard by the API.
+COPY --from=dashboard /app/api/static/dashboard ./app/api/static/dashboard
 
 # Run as a non-root user.
 RUN useradd --create-home --uid 10001 boomshare \

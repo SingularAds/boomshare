@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/format.ts","./src/main.tsx","./src/types.ts","./src/components/chatthread.tsx","./src/components/customermodal.tsx","./src/components/customertable.tsx","./src/components/overview.tsx","./src/components/tokengate.tsx","./src/components/ui.tsx"],"version":"5.9.3"}

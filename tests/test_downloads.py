@@ -567,3 +567,58 @@ class TestTokenSeparation:
 
         customer = (await db.execute(select(Customer))).scalar_one()
         assert customer.downloaded_at is None
+
+
+class TestThreadsOpenWhereTheCustomerIs:
+    """Installing is a fact about the person, not about one thread."""
+
+    async def test_a_new_thread_for_an_installed_customer_does_not_restart_the_funnel(
+        self, client, db, ai, meta
+    ):
+        await send_link(client, ai)
+        link = (await db.execute(select(DownloadLink))).scalar_one()
+        await client.post(
+            "/internal/events/activation", json={"token": link.token}, headers=AUTH
+        )
+
+        # They now write to our other number, opening a second thread.
+        await post(client, text="hello again", phone_number_id="444555666")
+        await drain_queue()
+
+        stages = {
+            c.sales_stage
+            for c in (await db.execute(select(Conversation))).scalars()
+        }
+        assert stages == {SalesStage.ACTIVATED}
+
+    async def test_a_downloaded_customer_opens_at_downloaded(self, client, db, ai, meta):
+        await send_link(client, ai)
+        link = (await db.execute(select(DownloadLink))).scalar_one()
+        await client.post(
+            "/internal/events/download", json={"token": link.token}, headers=AUTH
+        )
+
+        await post(client, text="hi on the other number", phone_number_id="444555666")
+        await drain_queue()
+
+        second = [
+            c
+            for c in (await db.execute(select(Conversation))).scalars()
+            if c.phone_number_id == "444555666"
+        ]
+        assert len(second) == 1
+        assert second[0].sales_stage == SalesStage.DOWNLOADED
+
+    async def test_a_customer_who_never_installed_still_starts_at_the_beginning(
+        self, client, db, ai, meta
+    ):
+        await post(client, text="hi")
+        await drain_queue()
+        await post(client, text="hi there", phone_number_id="444555666")
+        await drain_queue()
+
+        for conversation in (await db.execute(select(Conversation))).scalars():
+            assert conversation.sales_stage not in (
+                SalesStage.DOWNLOADED,
+                SalesStage.ACTIVATED,
+            )

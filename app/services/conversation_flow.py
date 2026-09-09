@@ -889,7 +889,9 @@ async def send_follow_up(reminder_id: uuid.UUID, client: MetaClient | None = Non
             )
             return
 
-        block = reminder_service.relevance_block(reminder, conversation, customer)
+        block = await reminder_service.relevance_block(
+            session, reminder, conversation, customer
+        )
         if block is not None:
             logger.info(
                 "follow-up skipped",

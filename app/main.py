@@ -22,8 +22,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
-from app.api import admin, health, internal, webhooks
+from app.api import admin, dashboard, health, internal, webhooks
 from app.core.config import get_settings
 from app.core.db import dispose_engine
 from app.core.errors import BoomshareError, MessagingPolicyError, PermanentError
@@ -133,6 +134,17 @@ def create_app() -> FastAPI:
     app.include_router(webhooks.router)
     app.include_router(internal.router)
     app.include_router(admin.router)
+    app.include_router(dashboard.router)
+    app.include_router(dashboard.page_router)
+
+    # Hashed build assets, so they can be cached hard. Mounted only when the
+    # build exists: a source checkout without `npm run build` still boots.
+    if dashboard.ASSETS.is_dir():
+        app.mount(
+            "/dashboard/assets",
+            StaticFiles(directory=dashboard.ASSETS),
+            name="dashboard-assets",
+        )
 
     return app
 

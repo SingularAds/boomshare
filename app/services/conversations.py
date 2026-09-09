@@ -126,7 +126,34 @@ async def get_or_create_open_conversation(
                 "phone_number_id": phone_number_id,
             },
         )
+        await _open_at_install_state(session, conversation, customer)
+
     return conversation, created
+
+
+async def _open_at_install_state(
+    session: AsyncSession, conversation: Conversation, customer: Customer
+) -> None:
+    """Start a new thread where the customer already is, not at the beginning.
+
+    Installing is a fact about the person, not about one thread. Someone who
+    installed last week and then writes to our other number opens a thread that
+    nothing will ever advance - the install event that would have moved it has
+    already happened - so it sits reporting a sale we have already made.
+    """
+    reached = (
+        SalesStage.ACTIVATED
+        if customer.activated_at is not None
+        else SalesStage.DOWNLOADED
+        if customer.downloaded_at is not None
+        else None
+    )
+    if reached is None:
+        return
+
+    await set_stage(
+        session, conversation, reached, system=True, reason="customer had already installed"
+    )
 
 
 async def load_history(

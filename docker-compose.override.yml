@@ -1,0 +1,39 @@
+# Local-only overrides. Compose loads this automatically alongside
+# docker-compose.yml; it is not used in any deployment.
+#
+# Why it exists: `docker-compose.yml` passes `.env` straight through, and on a
+# developer machine that file usually holds the real Meta and OpenAI
+# credentials. The worker in this stack drains the queue and runs the follow-up
+# sweeps, so a seeded local database plus a live access token is all it takes to
+# send a real WhatsApp message to whatever number the seed invented.
+#
+# Nothing here can reach a customer: the Meta token is rejected by Graph, and
+# the OpenAI key is rejected by OpenAI. The pipeline still runs end to end and
+# still records what it attempted - it just cannot deliver.
+services:
+  api:
+    environment:
+      ENVIRONMENT: local
+      META_APP_SECRET: local-compose-secret
+      META_VERIFY_TOKEN: local-compose-verify
+      META_ACCESS_TOKEN: local-compose-not-a-real-token
+      OPENAI_API_KEY: sk-local-compose-not-a-real-key
+      INTERNAL_API_TOKEN: local-internal-token
+      ADMIN_API_TOKEN: local-admin-token
+      DASHBOARD_API_TOKEN: local-dashboard-token
+      LOG_JSON: "false"
+      # Your own phones, hidden from the dashboard unless "Real customers
+      # only" is unticked. JSON list; leave the line out when unused.
+      # TEST_PHONE_NUMBERS: '["+91 99052 52720"]'
+
+  worker:
+    environment:
+      ENVIRONMENT: local
+      META_APP_SECRET: local-compose-secret
+      META_VERIFY_TOKEN: local-compose-verify
+      META_ACCESS_TOKEN: local-compose-not-a-real-token
+      OPENAI_API_KEY: sk-local-compose-not-a-real-key
+      INTERNAL_API_TOKEN: local-internal-token
+      ADMIN_API_TOKEN: local-admin-token
+      DASHBOARD_API_TOKEN: local-dashboard-token
+      LOG_JSON: "false"

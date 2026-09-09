@@ -677,3 +677,120 @@ class TestTheFollowUpLadder:
         reminder = (await db.execute(select(Reminder))).scalar_one()
         assert reminder.status == ReminderStatus.PENDING
         assert as_utc(reminder.due_at) - utcnow() <= timedelta(minutes=5)
+
+
+class TestOnePersonOneNudge:
+    """Sara wrote to both our numbers and was chased twice, half a second apart.
+
+    Being followed up is something that happens to a person. The service window
+    and the sales stage belong to a thread; the customer's patience does not.
+    """
+
+    async def test_a_second_thread_does_not_chase_the_same_person_again(
+        self, db, session_factory
+    ):
+        import uuid as _uuid
+        from datetime import timedelta
+
+        from app.core.clock import utcnow
+        from app.domain import ReminderStatus
+        from app.models import Conversation, Customer, Reminder
+        from app.services import reminders as reminder_service
+
+        async def arrange(session):
+            customer = Customer(phone="393481932788", wa_id="393481932788")
+            session.add(customer)
+            await session.flush()
+
+            threads = []
+            for number in ("111222333", "444555666"):
+                conversation = Conversation(
+                    customer_id=customer.id,
+                    channel="whatsapp",
+                    phone_number_id=number,
+                    sales_stage=SalesStage.LINK_SENT,
+                    stage_updated_at=utcnow(),
+                )
+                session.add(conversation)
+                threads.append(conversation)
+            await session.flush()
+
+            # The first thread has just chased them.
+            session.add(
+                Reminder(
+                    conversation_id=threads[0].id,
+                    customer_id=customer.id,
+                    kind="follow_up",
+                    status=ReminderStatus.SENT,
+                    due_at=utcnow() - timedelta(minutes=1),
+                    sent_at=utcnow() - timedelta(minutes=1),
+                    reason="automatic check-in 1 of 3",
+                )
+            )
+            # The second thread is about to.
+            pending = Reminder(
+                conversation_id=threads[1].id,
+                customer_id=customer.id,
+                kind="follow_up",
+                status=ReminderStatus.PROCESSING,
+                due_at=utcnow(),
+                reason="automatic check-in 1 of 3",
+            )
+            session.add(pending)
+            await session.flush()
+            return pending.id, threads[1].id, customer.id
+
+        pending_id, thread_id, customer_id = await db.write(arrange)
+
+        async with session_factory() as session:
+            reminder = await session.get(Reminder, pending_id)
+            conversation = await session.get(Conversation, thread_id)
+            customer = await session.get(Customer, customer_id)
+
+            block = await reminder_service.relevance_block(
+                session, reminder, conversation, customer
+            )
+            assert block == "already followed up on another thread"
+
+    async def test_a_lone_thread_is_still_chased(self, db, session_factory):
+        """The guard must not silence the ordinary case."""
+        from app.core.clock import utcnow
+        from app.domain import ReminderStatus
+        from app.models import Conversation, Customer, Reminder
+        from app.services import reminders as reminder_service
+
+        async def arrange(session):
+            customer = Customer(phone="919999999999", wa_id="919999999999")
+            session.add(customer)
+            await session.flush()
+            conversation = Conversation(
+                customer_id=customer.id,
+                channel="whatsapp",
+                phone_number_id="111222333",
+                sales_stage=SalesStage.LINK_SENT,
+                stage_updated_at=utcnow(),
+            )
+            session.add(conversation)
+            await session.flush()
+            reminder = Reminder(
+                conversation_id=conversation.id,
+                customer_id=customer.id,
+                kind="follow_up",
+                status=ReminderStatus.PROCESSING,
+                due_at=utcnow(),
+                reason="automatic check-in 1 of 3",
+            )
+            session.add(reminder)
+            await session.flush()
+            return reminder.id, conversation.id, customer.id
+
+        reminder_id, conversation_id, customer_id = await db.write(arrange)
+
+        async with session_factory() as session:
+            block = await reminder_service.relevance_block(
+                session,
+                await session.get(Reminder, reminder_id),
+                await session.get(Conversation, conversation_id),
+                await session.get(Customer, customer_id),
+            )
+            assert block is None

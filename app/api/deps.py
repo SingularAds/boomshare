@@ -59,3 +59,41 @@ async def require_admin_token(
         x_admin_token,
         audience="admin API",
     )
+
+
+async def require_dashboard_token(
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> None:
+    """Guards the read-only dashboard viewer endpoints.
+
+    Accepts either the lightweight dashboard_api_token (shareable with
+    operators and stakeholders) or the master admin_api_token (so the team
+    does not need two tokens to use their own dashboard). Rejected outright
+    when neither is configured - an empty string must never mean "open".
+
+    The dashboard token carries NO write authority - it cannot send messages,
+    take over conversations, wipe data, or reload prompts. Those endpoints
+    stay behind require_admin_token.
+    """
+    settings = get_settings()
+    dashboard_secret = settings.dashboard_api_token.get_secret_value()
+    admin_secret = settings.admin_api_token.get_secret_value()
+
+    if not dashboard_secret and not admin_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="dashboard API is not configured",
+        )
+
+    presented = x_admin_token
+    if not presented:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
+
+    # Accept the dedicated dashboard token when one is configured.
+    if dashboard_secret and hmac.compare_digest(dashboard_secret, presented):
+        return
+    # Fall back to the master admin token (so the team never needs two tokens).
+    if admin_secret and hmac.compare_digest(admin_secret, presented):
+        return
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")

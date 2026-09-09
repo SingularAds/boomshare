@@ -20,7 +20,7 @@ conversation is still alive.
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +53,14 @@ MAX_PENDING_PER_CONVERSATION = 3
 #: out would land on the rung it is already standing on and the ladder would
 #: never reach its top.
 _SPENT_STATUSES = (ReminderStatus.SENT, ReminderStatus.PROCESSING)
+
+#: How recently another thread must have chased this person for us to hold off.
+#: Being chased is something that happens to a *person*, not to a thread: a
+#: customer who wrote to two of our numbers has a follow-up queued on each, both
+#: come due together, and without this they receive the same nudge twice within
+#: a second. Comfortably shorter than the first rung of the ladder, so a genuine
+#: later rung is never suppressed.
+QUIET_PERIOD_AFTER_A_FOLLOW_UP = timedelta(hours=1)
 
 
 def follow_up_ladder() -> tuple[float, ...]:
@@ -250,8 +258,30 @@ async def claim(session: AsyncSession, reminder_id: uuid.UUID) -> Reminder | Non
     return reminder
 
 
-def relevance_block(
-    reminder: Reminder, conversation: Conversation, customer: Customer
+async def recently_chased_elsewhere(
+    session: AsyncSession, reminder: Reminder
+) -> datetime | None:
+    """When another thread last chased this same person, if it was recent.
+
+    One person, one nudge. The service window and the sales stage belong to a
+    thread, but the customer's patience does not.
+    """
+    since = utcnow() - QUIET_PERIOD_AFTER_A_FOLLOW_UP
+    stmt = select(func.max(Reminder.sent_at)).where(
+        Reminder.customer_id == reminder.customer_id,
+        Reminder.conversation_id != reminder.conversation_id,
+        Reminder.status == ReminderStatus.SENT,
+        Reminder.sent_at.is_not(None),
+        Reminder.sent_at >= since,
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def relevance_block(
+    session: AsyncSession,
+    reminder: Reminder,
+    conversation: Conversation,
+    customer: Customer,
 ) -> str | None:
     """Why this follow-up should NOT be sent now, or None if it should."""
     if customer.is_opted_out:
@@ -271,6 +301,9 @@ def relevance_block(
     last_inbound = as_utc(conversation.last_inbound_at)
     if created and last_inbound and last_inbound > created:
         return "customer already replied"
+
+    if await recently_chased_elsewhere(session, reminder) is not None:
+        return "already followed up on another thread"
 
     return None
 

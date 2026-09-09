@@ -101,6 +101,11 @@ curl -H "X-Admin-Token: $ADMIN_API_TOKEN" localhost:8000/admin/reports/funnel
 curl -H "X-Admin-Token: $ADMIN_API_TOKEN" localhost:8000/admin/reports/agent
 ```
 
+Or open <http://localhost:8000/dashboard> and paste the same token into it. The
+page is built from `dashboard/` — the Docker image builds it, so a source
+checkout needs `cd dashboard && npm install && npm run build` once before the
+route serves anything.
+
 Step-by-step verification of every feature is in the
 **[testing guide](docs/testing-guide.md)**, and the guide to connecting a real
 Meta developer account is **[docs/meta-setup.md](docs/meta-setup.md)**.
@@ -181,7 +186,7 @@ redaction filter. Nothing is hardcoded.
 ## Tests
 
 ```bash
-pytest                              # 464 tests, ~40s, no network
+pytest                              # 504 tests, ~40s, no network
 pytest --cov=app --cov-report=term  # ~92% coverage
 pytest tests/test_inbound_flow.py   # one area
 ```

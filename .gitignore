@@ -86,3 +86,11 @@ docs/
 # ---------------------------------------------------------------------------
 .DS_Store
 Thumbs.db
+
+# Dashboard: node deps and the Vite build output (the Dockerfile builds it)
+node_modules/
+dashboard/node_modules/
+app/api/static/dashboard/
+
+# Local developer tooling (cloud-sql-proxy binary)
+tools/

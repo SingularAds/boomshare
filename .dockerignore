@@ -44,3 +44,10 @@ htmlcov
 !.env.example
 *.pem
 *.key
+
+# Node / dashboard build
+node_modules
+dashboard/node_modules
+
+# Local dev tooling (cloud-sql-proxy) - 33MB, never needed in the image
+tools

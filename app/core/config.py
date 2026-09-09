@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # cannot: is this number ours, and which one do we send from when there is
     # no inbound message to answer (a lead ad). The first entry is that default.
     whatsapp_phone_number_ids: tuple[str, ...] = ()
+    # What to call each of those numbers in the operator UI. Meta gives us an
+    # opaque id, which tells a human nothing, so this maps it to the number as
+    # they would dial it. Optional: an id with no entry falls back to its
+    # position in the list above, which is stable and needs no configuration.
+    whatsapp_number_labels: dict[str, str] = {}
     # Approved template used to open a conversation with a lead-ad lead.
     whatsapp_lead_template_name: str = "boomshare_lead_intro"
     whatsapp_lead_template_language: str = "en"
@@ -85,6 +90,21 @@ class Settings(BaseSettings):
     # can delete the database. It is never shared outside the team, so it must
     # not be the same string as the one we hand to a partner.
     admin_api_token: SecretStr = SecretStr("")
+    # Read-only counterpart to admin_api_token. Guards the dashboard viewer
+    # endpoints (overview, customer list, customer detail) only. Unlike the
+    # master token it carries no write authority - it cannot send messages,
+    # take over conversations, or touch any data. Share this with operators
+    # and stakeholders; keep admin_api_token strictly internal.
+    # When blank, the dashboard falls back to accepting admin_api_token only.
+    dashboard_api_token: SecretStr = SecretStr("")
+
+    # Our own numbers, used for testing the pipeline against the real system.
+    # They are ordinary customers to every other part of the application - the
+    # AI answers them, the funnel counts them - because treating them specially
+    # would mean testing something other than what ships. The dashboard is the
+    # one place that hides them, so the numbers an operator reads are the ones
+    # that came from outside the team.
+    test_phone_numbers: tuple[str, ...] = ()
 
     # ---- product ---------------------------------------------------------
     download_base_url: str = "https://boomshare.ai/download"
@@ -139,6 +159,18 @@ class Settings(BaseSettings):
     @classmethod
     def _upper(cls, v: str) -> str:
         return v.upper()
+
+    @field_validator("test_phone_numbers", mode="after")
+    @classmethod
+    def _normalise_test_numbers(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Store them the way the database does, so a match is a plain equality.
+
+        Whoever fills this in will paste `+91 99052 52720` from their phone;
+        the customers table holds `919905252720`.
+        """
+        from app.services.customers import normalise_phone
+
+        return tuple(dict.fromkeys(filter(None, (normalise_phone(n) for n in value))))
 
     @field_validator("whatsapp_phone_number_ids", mode="after")
     @classmethod
