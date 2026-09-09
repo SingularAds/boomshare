@@ -30,9 +30,8 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [outcome, setOutcome] = useState<Outcome>("");
   const [offset, setOffset] = useState(0);
-  // Ticked by default: the figures should describe people from outside the
-  // team until someone deliberately asks to see our own test numbers.
-  const [realOnly, setRealOnly] = useState(true);
+  // Real customers only — the toggle has been removed; this is always true.
+  const realOnly = true;
 
   const [selected, setSelected] = useState<CustomerDetail | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -197,7 +196,7 @@ export default function App() {
           <div className="flex items-center gap-2">
             {/* Ticked, the page describes people from outside the team. Unticked,
                 it also counts the numbers we test the pipeline with. */}
-            <label
+            {/* <label
               className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200/90 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 select-none hover:border-slate-300 dark:border-slate-700/80 dark:bg-[#111622] dark:text-slate-200"
               title="Our own test numbers are hidden unless you untick this."
             >
@@ -211,7 +210,7 @@ export default function App() {
                 className="size-3.5 accent-emerald-600"
               />
               Real customers only
-            </label>
+            </label> */}
             <button
               type="button"
               onClick={() => void loadAll()}
