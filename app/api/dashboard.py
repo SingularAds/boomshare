@@ -13,6 +13,7 @@ operator is entitled to tell them apart.
 from __future__ import annotations
 
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -36,6 +37,7 @@ from app.core.config import get_settings
 from app.core.db import get_db
 from app.core.logging import get_logger
 from app.domain import ConversationStatus, LeadSource, MessageDirection, SalesStage
+from app.localization import resolve_language
 from app.models import Campaign, Conversation, Customer, DownloadLink, Lead, Message
 
 logger = get_logger(__name__)
@@ -512,6 +514,7 @@ async def customer_detail(
         full_name=customer.full_name,
         email=customer.email,
         locale=customer.locale,
+        language=asdict(resolve_language(customer.phone, customer.locale)),
         created_at=customer.created_at,
         downloaded_at=customer.downloaded_at,
         activated_at=customer.activated_at,

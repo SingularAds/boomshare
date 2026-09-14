@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.ai.schemas import AiDecision
 from app.core.clock import as_utc, utcnow
+from app.core.config import Settings
 from app.domain import HandlingMode, MessageType, ReminderKind, ReminderStatus, SalesStage
 from app.models import AiDecisionLog, Conversation, Customer, Message, Reminder
 from app.services import reminders as reminder_service
@@ -261,6 +264,13 @@ class TestRelevanceAtSendTime:
         await send_follow_up(reminder_id)
 
 
+async def _age_beyond_the_window(session):
+    """Put the last inbound message far enough back that only a template is
+    allowed - the state every follow-up past the first rung is sent in."""
+    conversation = (await session.execute(select(Conversation))).scalar_one()
+    conversation.last_inbound_at = utcnow() - timedelta(hours=30)
+
+
 class TestOutsideTheServiceWindow:
     async def test_a_late_follow_up_uses_a_template(self, client, db, ai, meta):
         """More than 24h after the last inbound message, free-form is not
@@ -320,6 +330,58 @@ class TestOutsideTheServiceWindow:
         # Matches the approved body in docs/meta-setup.md, {{1}} filled in.
         assert sent.content.startswith("Hi ")
         assert "just checking in about Boomshare" in sent.content
+
+    async def test_the_ladder_carries_on_past_the_window(self, client, db, ai, meta):
+        """A template is a check-in like any other, so the next rung follows it.
+
+        Only the in-window path used to queue the rung after itself, so the
+        ladder ended at whichever check-in first fell outside the window - and
+        every rung beyond that one was never scheduled at all.
+        """
+        await start_conversation(client, ai)
+        reminder = (await db.execute(select(Reminder))).scalar_one()
+        await make_due(db, reminder.id)
+        await db.write(_age_beyond_the_window)
+
+        from app.services.conversation_flow import send_follow_up
+
+        await send_follow_up(reminder.id)
+
+        pending = list(
+            (
+                await db.execute(
+                    select(Reminder).where(Reminder.status == ReminderStatus.PENDING)
+                )
+            ).scalars()
+        )
+        assert len(pending) == 1
+        rungs = len(reminder_service.follow_up_ladder())
+        assert pending[0].reason == f"automatic check-in 2 of {rungs}"
+
+    async def test_a_silent_customer_outside_the_window_gets_the_whole_ladder_once(
+        self, client, db, ai, meta
+    ):
+        """Every rung, one template each, and then it stops."""
+        await start_conversation(client, ai)
+        await db.write(_age_beyond_the_window)
+
+        from app.services.conversation_flow import send_follow_up
+
+        for _ in range(len(reminder_service.follow_up_ladder()) + 2):
+            pending = list(
+                (
+                    await db.execute(
+                        select(Reminder).where(Reminder.status == ReminderStatus.PENDING)
+                    )
+                ).scalars()
+            )
+            if not pending:
+                break
+            await make_due(db, pending[0].id)
+            await send_follow_up(pending[0].id)
+
+        assert len(meta.templates) == len(reminder_service.follow_up_ladder())
+        assert {template.template for template in meta.templates} == {"boomshare_followup"}
 
 
 class TestClaiming:
@@ -607,6 +669,29 @@ class TestTheFollowUpLadder:
         rungs = len(reminder_service.follow_up_ladder())
         assert reminder_service.follow_up_delay(rungs - 1) is not None
         assert reminder_service.follow_up_delay(rungs) is None
+
+    def test_the_first_check_in_has_to_fit_inside_the_service_window(self):
+        """Otherwise every conversation's opening nudge is a template: billed,
+        rate-limited, and only sendable in a language Meta has approved. That
+        is a deployment typo, so it fails at startup rather than in spend."""
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, service_window_hours=24, follow_up_ladder_hours=[24, 72])
+
+        inside = Settings(_env_file=None, service_window_hours=24, follow_up_ladder_hours=[23, 72])
+        assert inside.follow_up_ladder_hours == (23.0, 72.0)
+
+    def test_check_ins_can_be_turned_off_entirely(self):
+        assert Settings(_env_file=None, follow_up_ladder_hours=[]).follow_up_ladder_hours == ()
+
+    def test_the_shipped_ladder_puts_every_rung_on_one_side_of_the_window_or_the_other(self):
+        """A rung whose running total lands on the window boundary is decided
+        by scheduler jitter, not by configuration: the same customer gets a
+        written reply or a template depending on how busy the sweep was."""
+        window = Settings(_env_file=None).service_window_hours
+        elapsed = 0.0
+        for gap in reminder_service.follow_up_ladder():
+            elapsed += gap
+            assert elapsed != window, f"check-in at {elapsed}h lands exactly on the {window}h window"
 
     async def test_a_silent_customer_is_not_messaged_forever(self, client, db, ai, meta):
         ai.queue_decision(

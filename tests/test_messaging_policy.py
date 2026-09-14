@@ -76,8 +76,13 @@ class TestServiceWindow:
 
         assert outcome.sent
         assert meta.templates[-1].template == "boomshare_followup"
-        # The readable text is persisted so history and prompts stay useful.
-        assert outcome.message.content == "still there?"
+        # What is persisted is the template's approved body, not the reply that
+        # was replaced on its way out. "still there?" was never delivered, and
+        # storing it would have the model answer for words it never sent.
+        assert outcome.message.content == (
+            "Hi Priya, just checking in about Boomshare. "
+            "Still interested? Happy to help whenever suits."
+        )
         assert outcome.message.message_type == MessageType.TEMPLATE
 
     async def test_the_window_reopens_when_the_customer_writes_again(

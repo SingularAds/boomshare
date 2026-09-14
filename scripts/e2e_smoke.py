@@ -46,12 +46,19 @@ os.environ.update(
         "WHATSAPP_PHONE_NUMBER_IDS": '["111222333", "444555666"]',  # Brazil, USA
         "OPENAI_API_KEY": "sk-smoke",
         "INTERNAL_API_TOKEN": "smoke-internal-token",
+        "ADMIN_API_TOKEN": "smoke-admin-token",
+        "DEBUG": "false",
         "DOWNLOAD_BASE_URL": "https://boomshare.ai/download",
         "LOG_LEVEL": "WARNING",
         "LOG_JSON": "false",
         "RUN_EMBEDDED_WORKER": "false",
         "SCHEDULER_INTERVAL_SECONDS": "1",
         "WEBHOOK_SWEEP_AFTER_SECONDS": "2",
+        # The language policy production runs, stated here rather than read
+        # from a developer's `.env`, so the run proves the deployed mapping.
+        "COUNTRY_LANGUAGE_OVERRIDES": '{"IN":"en-IN","ES":"es-ES","PT":"pt-PT","BR":"pt-BR"}',
+        "WHATSAPP_TEMPLATE_LANGUAGES": '{"boomshare_lead_intro":{"pt":"pt_BR","es":"es","en":"en"},"boomshare_followup":{"pt":"pt_BR","es":"es","en":"en"}}',
+        "WHATSAPP_TEMPLATE_BODIES": '{"boomshare_lead_intro":{"en":"Hi {{1}}, thanks for your interest in Boomshare! Happy to answer any questions - what made you look into it?"},"boomshare_followup":{"en":"Hi {{1}}, just checking in about Boomshare. Still interested? Happy to help whenever suits.","pt_BR":"Oi {{1}}, passando para saber do Boomshare. Ainda tem interesse? Posso ajudar quando quiser.","es":"Hola {{1}}, te escribo por lo de Boomshare. ¿Te sigue interesando? Encantados de ayudarte cuando quieras."}}',
     }
 )
 
@@ -70,7 +77,10 @@ from app.integrations.meta.signature import compute_signature  # noqa: E402
 
 PORT = 8123
 BASE = f"http://127.0.0.1:{PORT}"
-AUTH = {"X-Internal-Token": "smoke-internal-token"}
+AUTH = {
+    "X-Internal-Token": "smoke-internal-token",
+    "X-Admin-Token": "smoke-admin-token",
+}
 
 GREEN, RED, DIM, BOLD, RESET = "\033[32m", "\033[31m", "\033[2m", "\033[1m", "\033[0m"
 
@@ -122,7 +132,11 @@ def script_reply(**decision) -> None:
     openai_script.append(payload)
 
 
+openai_prompts: list[list[dict]] = []
+
+
 def openai_handler(request: httpx.Request) -> httpx.Response:
+    openai_prompts.append(json.loads(request.content)["messages"])
     decision = openai_script.pop(0) if openai_script else {
         "reply_text": "Happy to help - what would you like to know?",
         "intent": "information_request",
@@ -1302,6 +1316,97 @@ async def run_journey() -> None:
         check("and none of them burned a retry attempt",
               await retried_event_count() == retried_before,
               f"{await retried_event_count()} retried, was {retried_before}")
+
+
+        step("30. Sender country selects the conversation language")
+        for phone, country, language, reply in (
+            ("34612345678", "Spain", "Spanish (Spain) (es-ES)", "Hola, ¿qué te gustaría grabar?"),
+            ("351912345678", "Portugal", "Portuguese (Portugal) (pt-PT)", "Olá, o que gostaria de gravar?"),
+            ("5511987654321", "Brazil", "Portuguese (Brazil) (pt-BR)", "Olá, o que você gostaria de gravar?"),
+        ):
+            script_reply(reply_text=reply)
+            await signed_post(http, inbound("Hello", wa_id=phone))
+            await drain()
+            system = "\n".join(m["content"] for m in openai_prompts[-1] if m["role"] == "system")
+            check(f"{country} country reaches the real OpenAI client", f"Phone-number country: {country}" in system)
+            check(f"{country} reply language reaches the real OpenAI client", f"Reply language: {language}" in system)
+            check(f"{country} Unicode reply reaches the real Meta client", whatsapp_outbox[-1]["text"]["body"] == reply)
+            check(f"{country} reply goes to the sender", whatsapp_outbox[-1]["to"] == phone)
+
+        step("31. A follow-up outside the window uses the approved translation")
+        # Brazil wrote to us in step 30, so there is a check-in queued for them.
+        # Pull it forward and close the service window: free-form is no longer
+        # allowed, and the only translation Meta will accept is an approved one.
+        async with session_scope() as session:
+            brazil = (
+                await session.execute(
+                    select(Conversation)
+                    .join(Customer, Customer.id == Conversation.customer_id)
+                    .where(Customer.phone == "5511987654321")
+                )
+            ).scalar_one()
+            brazil.last_inbound_at = utcnow() - timedelta(hours=30)
+            queued = (
+                await session.execute(
+                    select(Reminder).where(
+                        Reminder.conversation_id == brazil.id, Reminder.status == "pending"
+                    )
+                )
+            ).scalar_one()
+            queued.due_at = utcnow() - timedelta(seconds=1)
+
+        sent_before = len(whatsapp_outbox)
+        deadline = asyncio.get_running_loop().time() + 20
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            if len(whatsapp_outbox) > sent_before:
+                break
+
+        check("the follow-up went out", len(whatsapp_outbox) > sent_before)
+        if len(whatsapp_outbox) > sent_before:
+            delivered = whatsapp_outbox[-1]
+            check("it went as a template, which is all Meta allows now",
+                  delivered.get("type") == "template")
+            check("in the language approved for Brazil, at the Meta HTTP boundary",
+                  delivered.get("template", {}).get("language", {}).get("code") == "pt_BR",
+                  f"language={delivered.get('template', {}).get('language')}")
+            async with session_scope() as session:
+                stored = (
+                    await session.execute(
+                        select(Message)
+                        .where(Message.conversation_id == brazil.id,
+                               Message.message_type == "template")
+                        .order_by(Message.created_at.desc())
+                    )
+                ).scalars().first()
+                pending = list(
+                    (
+                        await session.execute(
+                            select(Reminder).where(
+                                Reminder.conversation_id == brazil.id,
+                                Reminder.status == "pending",
+                            )
+                        )
+                    ).scalars()
+                )
+            check("stored as the approved Portuguese body, not as a placeholder",
+                  stored is not None and stored.content.startswith("Olá ") and "[" not in stored.content,
+                  f"stored={stored.content if stored else None}")
+            check("and the ladder carried on past the window",
+                  len(pending) == 1,
+                  f"{len(pending)} queued")
+            note(f"follow-up: {stored.content if stored else None}")
+
+        step("32. Explicit language preference survives into the next turn")
+        script_reply(reply_text="Of course. What would you like to record?", preferred_language="en")
+        await signed_post(http, inbound("Please speak English", wa_id="34612345678"))
+        await drain()
+        script_reply(reply_text="You can record your screen and share it with a link.")
+        await signed_post(http, inbound("ok", wa_id="34612345678"))
+        await drain()
+        system = "\n".join(m["content"] for m in openai_prompts[-1] if m["role"] == "system")
+        check("explicit language is persisted and applied", "Reply language: English (en)" in system)
+        check("phone country remains Spain", "Phone-number country: Spain (ES)" in system)
 
 
 # --------------------------------------------------------------------------- #

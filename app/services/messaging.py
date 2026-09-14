@@ -11,6 +11,7 @@ message that vanished without a trace is the hardest thing to debug later.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,10 +22,14 @@ from app.core.logging import get_logger
 from app.core.trace import trace
 from app.domain import MessageStatus, MessageType
 from app.integrations.meta.client import MetaClient, get_meta_client
+from app.localization import normalize_locale, resolve_language
 from app.models import Conversation, Customer, Message
 from app.services import conversations as conversation_service
 
 logger = get_logger(__name__)
+
+#: `{{1}}`, `{{2}}`... in an approved template body, as Meta writes them.
+_TEMPLATE_PLACEHOLDER = re.compile(r"\{\{(\d+)\}\}")
 
 
 @dataclass(slots=True)
@@ -109,21 +114,31 @@ async def send_template(
     template_name: str,
     language: str = "en",
     body_parameters: list[str] | None = None,
-    preview_text: str | None = None,
     client: MetaClient | None = None,
 ) -> SendOutcome:
     """Business-initiated message. The only thing allowed outside the window.
 
-    `preview_text` is what we persist as the message body, so the conversation
-    history and the AI prompt read naturally - the template id alone is useless
-    context.
+    It goes out in the customer's own language wherever that translation is
+    approved for this template, and in `language` - the template's configured
+    default - otherwise.
+
+    What we persist as the body is the approved text of the language that
+    actually went out, because that is the only thing the customer saw. It is
+    never English standing in for a translation, and never the AI prose that a
+    template replaced on its way out: `app/ai/context.py` reads this back as
+    the model's own history, and either of those would have it answer for words
+    it never sent.
     """
     blocked = _policy_block(conversation, customer)
     if blocked:
         return SendOutcome(False, None, blocked)
 
+    language = _approved_language(template_name, customer) or language
+    content = _approved_body(template_name, language, body_parameters) or (
+        f"[template:{template_name}, language:{language}]"
+    )
+
     client = client or get_meta_client()
-    content = preview_text or f"[template:{template_name}]"
     try:
         result = await client.send_template(
             customer.wa_id or customer.phone,
@@ -193,9 +208,48 @@ async def send_reply(
             template_name=settings.whatsapp_followup_template_name,
             language=settings.whatsapp_followup_template_language,
             body_parameters=[customer.full_name or "there"],
-            preview_text=body,
             client=client,
         )
+
+
+def _approved_language(template_name: str, customer: Customer) -> str | None:
+    """The customer's own language, if Meta has approved it for this template.
+
+    An exact locale wins, then the base language, so one approved `pt_BR` covers
+    every Portuguese-speaking market we answer and one `es` every Spanish one.
+    `None` means no translation applies and the caller's default stands: we
+    cannot translate an approved template at send time, and sending an
+    unapproved language code is Meta error 132001.
+    """
+    selected = resolve_language(customer.phone, customer.locale)
+    variants = get_settings().whatsapp_template_languages.get(template_name, {})
+    return variants.get(selected.language_code) or variants.get(
+        selected.language_code.split("-")[0]
+    )
+
+
+def _approved_body(
+    template_name: str, language: str, body_parameters: list[str] | None
+) -> str | None:
+    """The words WhatsApp rendered, or `None` if we were never told them.
+
+    Meta owns the wording - it is reviewed and approved there - so all that is
+    left to do here is fill in the `{{n}}` placeholders with the parameters
+    that went out beside it.
+    """
+    bodies = get_settings().whatsapp_template_bodies.get(template_name, {})
+    body = bodies.get(normalize_locale(language) or language)
+    if body is None:
+        return None
+    parameters = body_parameters or []
+
+    def fill(placeholder: re.Match[str]) -> str:
+        index = int(placeholder.group(1)) - 1
+        # A parameter we never sent leaves the placeholder visible rather than
+        # inventing a value; Meta rejects that send anyway (error 132000).
+        return parameters[index] if 0 <= index < len(parameters) else placeholder.group(0)
+
+    return _TEMPLATE_PLACEHOLDER.sub(fill, body)
 
 
 def _sender(conversation: Conversation) -> str | None:

@@ -103,6 +103,13 @@ export type CustomerDetail = {
   full_name: string | null;
   email: string | null;
   locale: string | null;
+  language: {
+    country_code: string | null;
+    country_name: string | null;
+    language_code: string;
+    language_name: string;
+    source: "customer_preference" | "phone_country" | "fallback";
+  };
   created_at: string;
   downloaded_at: string | null;
   activated_at: string | null;

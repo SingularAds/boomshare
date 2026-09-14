@@ -339,7 +339,13 @@ async def reset_data(
         ).scalar_one_or_none()
         if customer is None:
             return {"status": "not_found", "phone": phone}
-        await session.delete(customer)
+        # Deliberately a bulk DELETE rather than `session.delete(customer)`.
+        # The ORM relationships are not configured to cascade, so the unit of
+        # work tries to orphan the children first - `UPDATE conversations SET
+        # customer_id = NULL` - against a NOT NULL column, and the whole reset
+        # fails. Every child foreign key already carries ON DELETE CASCADE, so
+        # letting the database do it is both correct and one statement.
+        await session.execute(delete(Customer).where(Customer.id == customer.id))
         await session.commit()
         try:
             r = redis_helper.get_redis()

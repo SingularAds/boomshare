@@ -59,8 +59,11 @@ def configure_sqlite(engine: AsyncEngine) -> None:
     `scripts/e2e_smoke.py` run against, so neither needs a server - which is
     only worth anything if the application behaves the same way on it.
 
-    Two defaults have to change:
+    Three defaults have to change:
 
+    * **Foreign keys are not enforced.** SQLite accepts `ON DELETE CASCADE` in
+      the schema and then ignores it, so a parent delete that PostgreSQL
+      cascades would silently orphan rows here instead.
     * **No implicit transactions.** pysqlite (and so aiosqlite) opens its own,
       which breaks SAVEPOINT - and `services.base.insert_or_get` relies on
       savepoints for its race-safe insert.
@@ -79,6 +82,11 @@ def configure_sqlite(engine: AsyncEngine) -> None:
     @event.listens_for(engine.sync_engine, "connect")
     def _disable_implicit_begin(dbapi_connection: Any, _record: Any) -> None:
         dbapi_connection.isolation_level = None
+        # SQLite parses `ON DELETE CASCADE` and then ignores it unless this is
+        # on. Every child row in this schema hangs off a cascading foreign key,
+        # so without it a delete that PostgreSQL cascades leaves orphans here
+        # and the difference only shows up in production.
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     @event.listens_for(engine.sync_engine, "begin")
     def _begin_immediate(connection: Any) -> None:

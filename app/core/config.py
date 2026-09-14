@@ -6,6 +6,7 @@ in a repr / log line by accident.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import Literal
 
@@ -18,10 +19,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _DEFAULT_DATABASE_URL = "postgresql+asyncpg://boomshare:boomshare@localhost:5432/boomshare"
 _DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 
+# Which dotenv file backs the real environment variables, if any. Set it empty
+# to use none: pydantic deep-merges a dict setting across its sources, so a
+# `.env` on the developer's machine contributes keys to something like
+# COUNTRY_LANGUAGE_OVERRIDES even when the environment sets it to {}. The test
+# suite states its own configuration and has to be able to mean exactly that.
+_ENV_FILE = os.getenv("BOOMSHARE_ENV_FILE", ".env") or None
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -112,6 +120,21 @@ class Settings(BaseSettings):
     max_reply_characters: int = 900
 
     # ---- conversation policy --------------------------------------------
+    default_conversation_language: str = "en"
+    # ISO country -> language/locale, e.g. {"IN": "en-IN", "CA": "fr-CA"}.
+    country_language_overrides: dict[str, str] = {}
+    # Template name -> conversation locale -> approved Meta language code.
+    whatsapp_template_languages: dict[str, dict[str, str]] = {}
+    # Template name -> language -> the approved body, copied from WhatsApp
+    # Manager with its {{n}} placeholders left in. Meta owns this text: it is
+    # reviewed there, it is what the customer is actually shown, and we cannot
+    # translate or reword it at send time. Mirroring it here is what lets a
+    # template message be stored as the words that were delivered, which
+    # `app/ai/context.py` reads back to the model as its own history - a
+    # placeholder there means the next reply is written believing we said
+    # something we never sent. A language with no entry falls back to naming
+    # the template rather than inventing a body for it.
+    whatsapp_template_bodies: dict[str, dict[str, str]] = {}
     # Meta's customer service window: free-form replies are only allowed
     # within 24h of the customer's last inbound message.
     service_window_hours: int = 24
@@ -132,7 +155,13 @@ class Settings(BaseSettings):
     # later, and continuing to send them is what costs a WhatsApp number its
     # quality rating. The first gap stays under `service_window_hours` so that
     # nudge can be a normal AI message rather than a template.
-    follow_up_ladder_hours: tuple[float, ...] = (4.0, 20.0, 72.0)
+    #
+    # Each gap is measured from the check-in before it, so what decides whether
+    # a rung is free-form or a template is the running total against
+    # `service_window_hours`: 4 + 22 puts the second nudge at 26h, safely a
+    # template. The previous 4 + 20 landed it on 24h exactly, where a few
+    # seconds of scheduler jitter picked which of the two it would be.
+    follow_up_ladder_hours: tuple[float, ...] = (4.0, 22.0, 72.0)
 
     # ---- worker ----------------------------------------------------------
     run_embedded_worker: bool = True
@@ -159,6 +188,58 @@ class Settings(BaseSettings):
     @classmethod
     def _upper(cls, v: str) -> str:
         return v.upper()
+
+    @field_validator("default_conversation_language")
+    @classmethod
+    def _validate_language(cls, value: str) -> str:
+        from app.localization import normalize_locale
+
+        normalized = normalize_locale(value)
+        if normalized is None:
+            raise ValueError("unsupported conversation language")
+        return normalized
+
+    @field_validator("country_language_overrides")
+    @classmethod
+    def _validate_country_languages(cls, value: dict[str, str]) -> dict[str, str]:
+        from phonenumbers import SUPPORTED_REGIONS
+
+        result = {}
+        for country, language in value.items():
+            country = country.upper()
+            if country not in SUPPORTED_REGIONS:
+                raise ValueError("country language overrides require ISO phone-country codes")
+            result[country] = cls._validate_language(language)
+        return result
+
+    @field_validator("whatsapp_template_bodies")
+    @classmethod
+    def _validate_template_bodies(cls, value: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+        """Keyed by language the same way `whatsapp_template_languages` is, so
+        `pt_BR` from Meta and `pt-BR` from a locale are the same entry."""
+        result: dict[str, dict[str, str]] = {}
+        for name, bodies in value.items():
+            if not name.strip():
+                raise ValueError("template name cannot be blank")
+            result[name] = {}
+            for language, body in bodies.items():
+                if not body.strip():
+                    raise ValueError(f"template body for {name}/{language} is blank")
+                result[name][cls._validate_language(language)] = body.strip()
+        return result
+
+    @field_validator("whatsapp_template_languages")
+    @classmethod
+    def _validate_template_languages(cls, value: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+        result = {}
+        for name, variants in value.items():
+            if not name.strip():
+                raise ValueError("template name cannot be blank")
+            result[name] = {}
+            for locale, meta_code in variants.items():
+                cls._validate_language(meta_code)
+                result[name][cls._validate_language(locale)] = meta_code
+        return result
 
     @field_validator("test_phone_numbers", mode="after")
     @classmethod
@@ -188,6 +269,24 @@ class Settings(BaseSettings):
         if len(set(cleaned)) != len(cleaned):
             raise ValueError(f"WHATSAPP_PHONE_NUMBER_IDS contains duplicates: {cleaned}")
         return tuple(cleaned)
+
+    @model_validator(mode="after")
+    def _check_follow_up_ladder(self) -> Settings:
+        """The first check-in has to be answerable with an ordinary message.
+
+        A first gap at or beyond the service window means every conversation's
+        opening nudge is a template - billed, rate-limited, and untranslatable
+        at send time. That is a deployment typo rather than a policy choice, so
+        it fails here instead of showing up as template spend. An empty ladder
+        is legitimate: it turns automatic check-ins off.
+        """
+        if any(hours <= 0 for hours in self.follow_up_ladder_hours):
+            raise ValueError("FOLLOW_UP_LADDER_HOURS must be positive")
+        if self.follow_up_ladder_hours and self.follow_up_ladder_hours[0] >= self.service_window_hours:
+            raise ValueError(
+                "the first FOLLOW_UP_LADDER_HOURS gap must fall inside SERVICE_WINDOW_HOURS"
+            )
+        return self
 
     @model_validator(mode="after")
     def _require_secrets_when_deployed(self) -> Settings:

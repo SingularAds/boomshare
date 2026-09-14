@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { CustomerDetail } from "../types";
-import { countryFlag, dateTime, stageTone, words } from "../format";
+import { dateTime, stageTone, words } from "../format";
 import { ChatThread } from "./ChatThread";
 import { CopyButton, Dash, Skeleton, Tag } from "./ui";
 
@@ -71,7 +71,13 @@ export function CustomerModal({
 
   const name = customer?.full_name ?? (loading ? "Loading Contact Details…" : "Unknown Contact");
   const initial = (customer?.full_name ?? customer?.phone ?? "?").trim().charAt(0).toUpperCase();
-  const flagInfo = customer ? countryFlag(customer.phone) : { flag: "🌐", country: "Global" };
+  const countryCode = customer?.language.country_code;
+  const flagInfo = {
+    country: customer?.language.country_name ?? "Unknown",
+    flag: countryCode
+      ? String.fromCodePoint(...Array.from(countryCode, (letter) => 127397 + letter.charCodeAt(0)))
+      : "🌐",
+  };
   const currentThread = customer?.conversations?.[activeThreadIndex];
 
   return (
@@ -296,7 +302,8 @@ export function CustomerModal({
                   action={customer?.phone ? <CopyButton text={`+${customer.phone}`} /> : undefined}
                 />
                 <FactCard label="Email Address" value={customer?.email ?? <Dash />} />
-                <FactCard label="Locale & Country" value={`${customer?.locale ?? "Unknown"} (${flagInfo.country})`} />
+                <FactCard label="Phone Country" value={customer?.language.country_name ?? "Unknown"} />
+                <FactCard label="Conversation Language" value={customer?.language.language_name ?? "Unknown"} />
                 <FactCard
                   label="Reached Us On"
                   value={

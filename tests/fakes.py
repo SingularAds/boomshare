@@ -23,6 +23,7 @@ class SentMessage:
     kind: str  # "text" | "template"
     body: str | None = None
     template: str | None = None
+    language: str | None = None
     parameters: list[str] = field(default_factory=list)
     # Which of our numbers it went out from. Recorded because "the reply left
     # from the number they wrote to" is the whole point of multi-number support,
@@ -73,6 +74,7 @@ class FakeMetaClient:
                 to=to,
                 kind="template",
                 template=template_name,
+                language=language_code,
                 parameters=list(body_parameters or []),
                 phone_number_id=phone_number_id,
             )

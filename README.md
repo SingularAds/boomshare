@@ -186,7 +186,7 @@ redaction filter. Nothing is hardcoded.
 ## Tests
 
 ```bash
-pytest                              # 504 tests, ~40s, no network
+pytest                              # unit and integration tests, no network
 pytest --cov=app --cov-report=term  # ~92% coverage
 pytest tests/test_inbound_flow.py   # one area
 ```
@@ -221,6 +221,13 @@ Every decision — including what was rejected and why — is written to
 ---
 
 ## Editing the sales behaviour
+
+Incoming senders now receive replies in their phone country's default language
+(Spain → Spanish, Portugal → Portuguese, Brazil → Brazilian Portuguese).
+Explicit language requests are remembered across turns and follow-ups. The
+dashboard customer profile shows the country and effective conversation language.
+See [language routing](LANGUAGE_ROUTING.md) for architecture, configuration,
+multilingual-country defaults, approved template translations and test coverage.
 
 Two markdown files, no code:
 

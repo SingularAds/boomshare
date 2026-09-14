@@ -251,6 +251,14 @@ class DashboardLink(BaseModel):
     details: dict[str, Any] | None
 
 
+class CustomerLanguage(BaseModel):
+    country_code: str | None
+    country_name: str | None
+    language_code: str
+    language_name: str
+    source: str
+
+
 class CustomerDetail(BaseModel):
     """Everything the modal shows, in one request."""
 
@@ -259,6 +267,7 @@ class CustomerDetail(BaseModel):
     full_name: str | None
     email: str | None
     locale: str | None
+    language: CustomerLanguage
     created_at: datetime
     downloaded_at: datetime | None
     activated_at: datetime | None

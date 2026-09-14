@@ -52,6 +52,10 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 
+# Local QA reports, downloaded pages/bundles and live-test evidence.
+# Keep these available locally without adding them to application commits.
+/artifacts/
+
 # ---------------------------------------------------------------------------
 # Databases / local data
 # ---------------------------------------------------------------------------

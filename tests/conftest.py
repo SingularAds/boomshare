@@ -9,11 +9,18 @@ token or a WhatsApp message.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator
 
 # Settings are read once and cached, so the environment has to be right before
 # anything imports app.core.config.
+#
+# The suite configures the application entirely from here. Reading the
+# developer's `.env` as well would mean a test passing or failing on whichever
+# market, template translation or ladder they happen to have configured
+# locally - and passing for a reason CI, which has no `.env`, does not share.
+os.environ.setdefault("BOOMSHARE_ENV_FILE", "")
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
@@ -31,6 +38,39 @@ os.environ.setdefault("DASHBOARD_API_TOKEN", "test-dashboard-token")
 os.environ.setdefault("DOWNLOAD_BASE_URL", "https://boomshare.test/download")
 os.environ.setdefault("LOG_JSON", "false")
 os.environ.setdefault("LOG_LEVEL", "WARNING")
+# Language policy is asserted on directly, so it is stated here rather than
+# inherited from whichever `.env` the developer running the suite happens to
+# have. Country defaults are CLDR's until a test says otherwise, and no
+# template translation is approved until a test approves one.
+os.environ.setdefault("COUNTRY_LANGUAGE_OVERRIDES", "{}")
+os.environ.setdefault("WHATSAPP_TEMPLATE_LANGUAGES", "{}")
+# The bodies Meta approved, as deployed - `scripts/template_config.py` reads
+# them straight off the account. A template message is stored as these words,
+# so what a test asserts a customer was shown is checked against the same text
+# production sends.
+os.environ.setdefault(
+    "WHATSAPP_TEMPLATE_BODIES",
+    json.dumps(
+        {
+            "boomshare_lead_intro": {
+                "en": "Hi {{1}}, thanks for your interest in Boomshare! "
+                "Happy to answer any questions - what made you look into it?",
+                "pt_BR": "Olá {{1}}, obrigado pelo seu interesse no Boomshare! "
+                "Fico feliz em tirar qualquer dúvida — o que fez você se interessar por ele?",
+                "es": "¡Hola {{1}}! Gracias por tu interés en Boomshare. "
+                "Con gusto respondo cualquier duda. ¿Qué te llevó a buscar una herramienta como esta?",
+            },
+            "boomshare_followup": {
+                "en": "Hi {{1}}, just checking in about Boomshare. "
+                "Still interested? Happy to help whenever suits.",
+                "pt_BR": "Olá {{1}}, só passando para saber sobre o Boomshare. "
+                "Ainda tem interesse? Fico feliz em ajudar quando for melhor para você.",
+                "es": "Hola {{1}}, solo paso para ver qué tal con Boomshare. "
+                "¿Sigues interesado? Con gusto te ayudo cuando te convenga.",
+            },
+        }
+    ),
+)
 
 import fakeredis.aioredis  # noqa: E402
 import pytest  # noqa: E402

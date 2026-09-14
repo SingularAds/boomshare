@@ -22,6 +22,7 @@ from typing import Any
 from app.ai.knowledge import product_knowledge, sales_behaviour
 from app.core.clock import as_utc, utcnow
 from app.domain import MessageDirection, SalesStage
+from app.localization import resolve_language
 from app.models import Conversation, Customer, Lead, Message
 
 #: Hard cap per historical message so one pasted wall of text cannot blow up the
@@ -74,8 +75,6 @@ def customer_block(
     """
     lines = ["# Who you are talking to"]
     lines.append(f"- Name: {customer.full_name or 'unknown'}")
-    if customer.locale:
-        lines.append(f"- Locale: {customer.locale}")
 
     if lead is not None:
         source = "a click-to-WhatsApp ad" if lead.source == "click_to_whatsapp" else "a lead form"
@@ -138,6 +137,37 @@ def state_block(
     return "\n".join(lines)
 
 
+def language_block(customer: Customer) -> str:
+    language = resolve_language(customer.phone, customer.locale)
+    country = (
+        f"{language.country_name} ({language.country_code})"
+        if language.country_code else "unknown"
+    )
+    return "\n".join([
+        "# Conversation language (backend policy)",
+        f"- Phone-number country: {country}",
+        f"- Reply language: {language.language_name} ({language.language_code})",
+        f"- Language source: {language.source}",
+        "Resolve the language for THIS reply in this order: (1) a language explicitly "
+        "requested in the latest user message, (2) the reply language listed above. "
+        "The listed language is a default, NEVER a restriction on changing languages. "
+        "An explicit request overrides BOTH the saved preference and phone country. "
+        "For example, if the default is Portuguese and they say 'Please speak English', "
+        "reply in English immediately and set preferred_language to en. Never refuse "
+        "a language change or say you can only help in the previous language.",
+        "When changing language, report the requested language/locale in preferred_language. "
+        "Otherwise return null. Do not infer a request from a name, ad, quoted text, "
+        "or ordinary greetings in another language. Keep JSON keys and enums unchanged.",
+        "Use the resolved language for all customer-facing text, including greetings, "
+        "download instructions, handoffs, opt-out acknowledgements and follow-ups. "
+        "English examples and internal sales objectives never override this policy. "
+        "Respect regional usage: pt-PT uses European Portuguese (ecrã, ficheiro, partilhar); "
+        "pt-BR uses Brazilian Portuguese (tela, arquivo, compartilhar).",
+        "The phone-number country is a default, not proof of location, nationality or "
+        "the customer's own language. Do not claim those facts about them.",
+    ])
+
+
 def recent_history(messages: list[Message], limit: int) -> list[dict[str, str]]:
     """The last `limit` messages as chat turns, oldest first.
 
@@ -178,7 +208,14 @@ def build_context(
     ]
     if directive:
         # Used for turns the customer did not trigger, e.g. a due follow-up.
-        blocks.append("# What to do right now\n\n" + directive)
+        blocks.append(
+            "# What to do right now\n\n" + directive + "\n\n"
+            "This sales objective comes from earlier state. An explicit request in the "
+            "latest customer message takes priority: if they ask for the download, use "
+            "send_download_link and hand it over instead of offering it again (provided "
+            "their platform is supported or unknown). Honor opt-outs and human requests."
+        )
+    blocks.append(language_block(customer))
 
     return PromptContext(
         system_blocks=blocks,

@@ -470,6 +470,9 @@ async def _apply_decision(
 
     await conversation_service.record_intent(session, conversation, decision.intent)
     await conversation_service.merge_context_notes(session, conversation, decision.customer_notes)
+    if inbound_message_id is not None and result.usable and decision.preferred_language:
+        customer.locale = decision.preferred_language
+        await session.flush()
 
     applied_stage = await _apply_stage(session, conversation, decision, rejected)
 
@@ -756,6 +759,22 @@ async def _ensure_follow_up(
         # Nothing reached the customer, so there is nothing to follow up on.
         return
 
+    if await _schedule_next_check_in(session, conversation, customer):
+        executed.append("auto_follow_up")
+
+
+async def _schedule_next_check_in(
+    session: AsyncSession,
+    conversation: Conversation,
+    customer: Customer,
+) -> bool:
+    """Queue the rung after the one this customer has just been sent.
+
+    Shared by the two ways a check-in goes out - an AI message inside the
+    service window and an approved template outside it - because to the
+    customer they are the same unanswered message, and the ladder counts them
+    the same way.
+    """
     spent = await reminder_service.follow_ups_since_reply(session, conversation)
     delay = reminder_service.follow_up_delay(spent)
     if delay is None:
@@ -763,7 +782,7 @@ async def _ensure_follow_up(
             "no further check-ins - ladder exhausted",
             extra={"conversation_id": str(conversation.id), "unanswered": spent},
         )
-        return
+        return False
 
     reminder = await reminder_service.schedule(
         session,
@@ -772,8 +791,7 @@ async def _ensure_follow_up(
         delay=delay,
         reason=f"automatic check-in {spent + 1} of {len(reminder_service.follow_up_ladder())}",
     )
-    if reminder is not None:
-        executed.append("auto_follow_up")
+    return reminder is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -828,10 +846,6 @@ async def handle_leadgen(event: LeadgenEvent, client: MetaClient | None = None) 
             template_name=settings.whatsapp_lead_template_name,
             language=settings.whatsapp_lead_template_language,
             body_parameters=[first_name],
-            preview_text=(
-                f"Hi {first_name}, thanks for your interest in Boomshare! "
-                "Happy to answer any questions - what made you look into it?"
-            ),
             client=client,
         )
 
@@ -952,17 +966,6 @@ async def send_follow_up(reminder_id: uuid.UUID, client: MetaClient | None = Non
             template_name=settings.whatsapp_followup_template_name,
             language=settings.whatsapp_followup_template_language,
             body_parameters=[first_name],
-            # The approved body of `boomshare_followup` (see docs/meta-setup.md),
-            # with {{1}} filled in exactly as WhatsApp rendered it for the
-            # customer. This becomes the message's stored `content` - it is what
-            # the dashboard shows in the thread, and what the AI reads back as
-            # its own conversation history on the next turn. A placeholder here
-            # is not a display nicety: the model would answer "what did you
-            # just say" having never seen its own words.
-            preview_text=(
-                f"Hi {first_name}, just checking in about Boomshare. "
-                "Still interested? Happy to help whenever suits."
-            ),
             client=client,
         )
         if not outcome.sent:
@@ -985,3 +988,8 @@ async def send_follow_up(reminder_id: uuid.UUID, client: MetaClient | None = Non
             return
 
         await reminder_service.resolve(session, reminder, ReminderStatus.SENT, "template follow-up")
+        # A template is still a check-in this customer did not answer, so the
+        # ladder continues from here exactly as it does after an AI follow-up.
+        # Without this it stopped at whichever rung first fell outside the
+        # service window, and every rung past that one was never scheduled.
+        await _schedule_next_check_in(session, conversation, customer)

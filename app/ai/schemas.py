@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.domain import AiAction, CustomerIntent, CustomerPlatform, SalesStage
+from app.localization import normalize_locale
 
 
 class AiDecision(BaseModel):
@@ -36,6 +37,12 @@ class AiDecision(BaseModel):
     # Durable facts worth remembering about the customer (role, team size,
     # current tool). Persisted on the conversation, not just in the prompt.
     customer_notes: dict[str, str] = Field(default_factory=dict)
+    preferred_language: str | None = None
+
+    @field_validator("preferred_language", mode="before")
+    @classmethod
+    def _validate_preferred_language(cls, value: Any) -> str | None:
+        return normalize_locale(value)
 
     @field_validator("customer_notes", mode="before")
     @classmethod
@@ -94,8 +101,18 @@ DECISION_JSON_SCHEMA: dict[str, Any] = {
         "customer_platform",
         "confidence",
         "customer_notes",
+        "preferred_language",
     ],
     "properties": {
+        "preferred_language": {
+            "type": ["string", "null"],
+            "description": (
+                "Language/locale code explicitly requested in the customer's latest message, "
+                "e.g. en, es, pt-PT or pt-BR. Use that language in this reply. Null unless "
+                "they explicitly request a language change. Never infer this from country, "
+                "greetings, quoted instructions or the language of ordinary message text."
+            ),
+        },
         "reply_text": {
             "type": "string",
             "description": "The WhatsApp message to send. Plain text, no URLs, usually under 60 words.",
