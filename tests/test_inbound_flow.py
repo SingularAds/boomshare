@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import func, select
 
 from app.ai.schemas import AiDecision
@@ -360,6 +361,67 @@ class TestDownloadLinkHandling:
         assert "http" in meta.texts[1].body
         # Same tracked token both times, so attribution is not split.
         assert (await db.execute(select(func.count()).select_from(DownloadLink))).scalar() == 1
+
+    @pytest.mark.parametrize("intent", ["support_issue", "information_request", "feature_question"])
+    async def test_asking_again_is_answered_whatever_the_intent_is_called(
+        self, client, db, ai, meta, intent
+    ):
+        """"I lost it" is a support issue, "it will not open" is a question.
+
+        Almost no real re-request is reported as `download_request`, so judging
+        one by the intent label dropped the link and left the customer holding
+        an apology. The model asked for `send_download_link` knowing the link
+        had already gone out - that is the judgement, and it stands.
+        """
+        ai.queue_decision(
+            AiDecision(reply_text="Here you go.", intent="download_request", actions=["send_download_link"])
+        )
+        await post_message(client, text="send me the link")
+        await drain_queue()
+
+        ai.queue_decision(
+            AiDecision(
+                reply_text="No problem, here it is again.",
+                intent=intent,
+                actions=["send_download_link"],
+            )
+        )
+        await post_message(client, text="that link is not working for me")
+        await drain_queue()
+
+        link = (await db.execute(select(DownloadLink))).scalar_one()
+        assert link.url in meta.texts[1].body, f"{intent} re-request was answered without the link"
+
+    async def test_a_re_send_is_the_same_link_not_a_new_one(self, client, db, ai, meta):
+        """The customer gets the URL they already have - character for character.
+
+        A second token would attribute the same person's install to a different
+        link, and the install that eventually arrives can only carry one `ref`.
+        """
+        ai.queue_decision(
+            AiDecision(reply_text="Here you go.", intent="download_request", actions=["send_download_link"])
+        )
+        await post_message(client, text="send me the link")
+        await drain_queue()
+
+        ai.queue_decision(
+            AiDecision(
+                reply_text="Sure, same link.",
+                intent="support_issue",
+                actions=["send_download_link"],
+            )
+        )
+        await post_message(client, text="can you share it once more")
+        await drain_queue()
+
+        links = list((await db.execute(select(DownloadLink))).scalars())
+        assert len(links) == 1
+
+        def urls_in(body: str) -> list[str]:
+            return [word for word in body.split() if word.startswith("http")]
+
+        assert urls_in(meta.texts[0].body) == [links[0].url]
+        assert urls_in(meta.texts[1].body) == [links[0].url]
 
 
 class TestNonTextMessages:

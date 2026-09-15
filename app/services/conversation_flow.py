@@ -33,6 +33,7 @@ from app.core.errors import InvalidStateTransition, RetryableError
 from app.core.logging import get_logger
 from app.core.trace import trace
 from app.domain import (
+    PASSIVE_INTENTS,
     AiAction,
     HandlingMode,
     LeadStatus,
@@ -614,10 +615,19 @@ async def _attach_download_link(
         rejected["download_link_blocked"] = "customer opted out"
         return reply_text, None
 
-    explicit_request = decision.intent in {"download_request", "buying_intent"}
-    if link_already_sent and not explicit_request:
-        # Re-sending an ignored link is the behaviour we were explicitly asked
-        # to avoid. Let the AI's words stand without another URL.
+    if link_already_sent and decision.intent in PASSIVE_INTENTS:
+        # Re-sending an *ignored* link is the behaviour we were explicitly asked
+        # to avoid, and that is all this guards. The model is told the link has
+        # already gone out and told not to send it again unprompted, so when it
+        # asks anyway it has made a judgement about what the customer just said.
+        # We only overrule it where its own intent report says the customer
+        # cannot have been asking for anything - which is the one case where
+        # there is no judgement of ours to defer to.
+        #
+        # It used to be the other way round: only `download_request` and
+        # `buying_intent` were allowed through. Real re-requests are hardly ever
+        # labelled either ("I lost it" is a support issue), so the link was
+        # dropped and the customer was left holding an apology.
         rejected["download_link_suppressed"] = "link already sent and not re-requested"
         return reply_text, None
 

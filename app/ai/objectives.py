@@ -121,7 +121,10 @@ _POST_LINK = (
     "The link is already with them. Your only job now is getting them to a first "
     "recording. Do not pitch again, do not re-offer the link, and do not restate "
     "the features. Ask what is holding them back, or help with the step they are "
-    "stuck on."
+    "stuck on. The one exception: if they ask for the link again - they lost it, "
+    "it did not open, they are on another machine - request send_download_link "
+    "and give it to them. It is the same link they already have, so there is "
+    "nothing to apologise for and nothing to check first."
 )
 
 _OBJECTION = (

@@ -113,9 +113,10 @@ def state_block(
 
     if download_link_sent:
         lines.append(
-            "- A download link has ALREADY been sent to this customer. Do not ask the "
-            "backend to send it again unless they explicitly ask for it. Ask what is "
-            "holding them back instead."
+            "- A download link has ALREADY been sent to this customer. Ask what is "
+            "holding them back rather than pushing it again. If they do ask for it - "
+            "lost it, it will not open, a different computer - use send_download_link; "
+            "they get back the identical link, so never refuse or apologise for it."
         )
     else:
         lines.append("- No download link has been sent yet.")

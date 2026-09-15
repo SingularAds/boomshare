@@ -248,6 +248,27 @@ class CustomerIntent(StrEnum):
     UNCLEAR = "unclear"
 
 
+#: Intents where the customer's latest message cannot be read as asking us for
+#: anything. Used to decide whether a download link that has already been sent
+#: may be sent again: on these turns it may not, and on every other turn the
+#: model's own `send_download_link` is trusted.
+#:
+#: The list is deliberately the *exclusion*, not the permission. Judging a
+#: re-request by its intent label the other way round is what stopped customers
+#: getting their link back - almost nobody who says "I lost it" is reported as
+#: `download_request`; they are a `support_issue`, or a question, or whatever
+#: the model made of a sentence that meant "send it again".
+PASSIVE_INTENTS: frozenset[CustomerIntent] = frozenset(
+    {
+        CustomerIntent.GREETING,
+        CustomerIntent.SMALL_TALK,
+        CustomerIntent.UNCLEAR,
+        CustomerIntent.NOT_INTERESTED,
+        CustomerIntent.OPT_OUT,
+    }
+)
+
+
 class AiAction(StrEnum):
     """Business actions the AI may *request*. The application decides and executes."""
 

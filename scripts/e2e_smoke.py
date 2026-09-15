@@ -58,7 +58,7 @@ os.environ.update(
         # from a developer's `.env`, so the run proves the deployed mapping.
         "COUNTRY_LANGUAGE_OVERRIDES": '{"IN":"en-IN","ES":"es-ES","PT":"pt-PT","BR":"pt-BR"}',
         "WHATSAPP_TEMPLATE_LANGUAGES": '{"boomshare_lead_intro":{"pt":"pt_BR","es":"es","en":"en"},"boomshare_followup":{"pt":"pt_BR","es":"es","en":"en"}}',
-        "WHATSAPP_TEMPLATE_BODIES": '{"boomshare_lead_intro":{"en":"Hi {{1}}, thanks for your interest in Boomshare! Happy to answer any questions - what made you look into it?"},"boomshare_followup":{"en":"Hi {{1}}, just checking in about Boomshare. Still interested? Happy to help whenever suits.","pt_BR":"Oi {{1}}, passando para saber do Boomshare. Ainda tem interesse? Posso ajudar quando quiser.","es":"Hola {{1}}, te escribo por lo de Boomshare. ¿Te sigue interesando? Encantados de ayudarte cuando quieras."}}',
+        "WHATSAPP_TEMPLATE_BODIES": '{"boomshare_lead_intro":{"pt_BR":"Olá {{1}}, obrigado pelo seu interesse no Boomshare! Fico feliz em tirar qualquer dúvida — o que fez você se interessar por ele?","es":"¡Hola {{1}}! Gracias por tu interés en Boomshare. Con gusto respondo cualquier duda. ¿Qué te llevó a buscar una herramienta como esta?","en":"Hi {{1}}, thanks for your interest in Boomshare! Happy to answer any questions - what made you look into it?"},"boomshare_followup":{"pt_BR":"Olá {{1}}, só passando para saber sobre o Boomshare. Ainda tem interesse? Fico feliz em ajudar quando for melhor para você.","es":"Hola {{1}}, solo paso para ver qué tal con Boomshare. ¿Sigues interesado? Con gusto te ayudo cuando te convenga.","en":"Hi {{1}}, just checking in about Boomshare. Still interested? Happy to help whenever suits."}}',
     }
 )
 

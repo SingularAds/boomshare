@@ -139,6 +139,16 @@ class TestTheLadderCloses:
         objective = next_objective(SalesStage.ENGAGED, {}, download_link_sent=True)
         assert "do not re-offer the link" in objective
 
+    def test_but_it_still_hands_the_link_back_when_asked(self):
+        """"Stop selling" is not "refuse to resend".
+
+        Without this carve-out the objective reads as a flat ban and the model
+        answers someone who lost their link with an apology instead of the link.
+        """
+        objective = next_objective(SalesStage.ENGAGED, {}, download_link_sent=True)
+        assert "send_download_link" in objective
+        assert "apologise" in objective
+
     def test_an_objection_pivots_to_a_benefit_and_schedules(self):
         objective = next_objective(SalesStage.OBJECTION_HANDLING, {})
         assert "pivot to the benefit" in objective
