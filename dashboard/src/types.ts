@@ -21,6 +21,8 @@ export type Overview = {
   links_sent: number;
   links_clicked: number;
   customers_with_link: number;
+  /** People who opened their download link, each counted once. */
+  customers_clicked: number;
 
   conversations: number;
   conversations_open: number;
@@ -40,6 +42,8 @@ export type CustomerRow = {
   phone: string;
   full_name: string | null;
   created_at: string;
+  /** When they first opened a download link. */
+  clicked_at: string | null;
   downloaded_at: string | null;
   activated_at: string | null;
   opted_out_at: string | null;
@@ -121,4 +125,4 @@ export type CustomerDetail = {
   links: DownloadLinkOut[];
 };
 
-export type Outcome = "" | "activated" | "downloaded" | "not_downloaded" | "opted_out";
+export type Outcome = "" | "clicked" | "activated" | "downloaded" | "not_downloaded" | "opted_out";

@@ -150,6 +150,10 @@ class DashboardOverview(BaseModel):
     links_sent: int
     links_clicked: int
     customers_with_link: int
+    #: People who opened their download link, each counted once. `links_clicked`
+    #: counts links; this is the one a funnel step can sit under
+    #: `customers_with_link` without the percentages going wrong.
+    customers_clicked: int
 
     conversations: int
     conversations_open: int
@@ -179,6 +183,8 @@ class CustomerRow(BaseModel):
     full_name: str | None
     created_at: datetime
 
+    #: When they first opened a download link, reported by the download page.
+    clicked_at: datetime | None
     downloaded_at: datetime | None
     activated_at: datetime | None
     opted_out_at: datetime | None

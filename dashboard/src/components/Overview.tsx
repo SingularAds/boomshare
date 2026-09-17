@@ -152,7 +152,11 @@ export function KpiRow({
             <strong className="font-semibold text-slate-800 dark:text-slate-200">
               {num(data.customers_with_link)}
             </strong>{" "}
-            unique leads
+            unique leads ·{" "}
+            <strong className="font-semibold text-slate-800 dark:text-slate-200">
+              {num(data.customers_clicked)}
+            </strong>{" "}
+            clicked
           </span>
         }
         progressBar={{
@@ -234,6 +238,13 @@ export function Funnel({
       value: data.customers_with_link,
       sublabel: "We sent them a tracked link",
       tone: "from-indigo-500 to-indigo-600",
+    },
+    {
+      name: "Clicked the link",
+      value: data.customers_clicked,
+      sublabel: "Opened the download page",
+      outcome: "clicked",
+      tone: "from-violet-500 to-violet-600",
     },
   ];
 
@@ -362,7 +373,7 @@ export function Panels({
       <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-[1.4fr_1fr]">
         <Card
           title="Conversion Funnel"
-          subtitle="Only the steps we can verify from our own records"
+          subtitle="From our records and the download page"
         >
           <Funnel data={data} onSelectOutcome={onSelectOutcome} />
         </Card>

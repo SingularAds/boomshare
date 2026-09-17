@@ -16,6 +16,7 @@ import { TokenGate } from "./components/TokenGate";
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;
+const AUTO_REFRESH_MS = 30_000;
 
 export default function App() {
   const [token, setToken] = useState(readToken);
@@ -117,6 +118,52 @@ export default function App() {
     return () => {
       clearTimeout(timer);
       controller.abort();
+    };
+  }, [token, offset, search, outcome, realOnly, signOut]);
+
+  // Keep the figures current without anyone pressing Refresh, so a click,
+  // install or activation reported by the download page shows up on its own.
+  // It is deliberately silent: no skeletons, and the page, search and filter
+  // the operator is looking at stay exactly where they are. Ticks are skipped
+  // while the tab is hidden and while a load they started is still running,
+  // and changing the page or filter aborts a refresh already on its way.
+  const busy = useRef(false);
+  useEffect(() => {
+    busy.current = tableLoading || refreshing;
+  }, [tableLoading, refreshing]);
+
+  useEffect(() => {
+    if (!token) return;
+    let controller: AbortController | null = null;
+
+    const timer = setInterval(async () => {
+      if (document.hidden || busy.current) return;
+      controller?.abort();
+      const current = new AbortController();
+      controller = current;
+      try {
+        const [nextOverview, nextPage] = await Promise.all([
+          fetchOverview(token, !realOnly, current.signal),
+          fetchCustomers(
+            token,
+            { limit: PAGE_SIZE, offset, search, outcome, includeTest: !realOnly },
+            current.signal,
+          ),
+        ]);
+        if (current.signal.aborted || busy.current) return;
+        setOverview(nextOverview);
+        setPage(nextPage);
+      } catch (error) {
+        if (current.signal.aborted) return;
+        if (error instanceof Unauthorised) signOut(error.message);
+        // Any other failure keeps what is already on screen and waits for the
+        // next tick, rather than raising a banner every thirty seconds.
+      }
+    }, AUTO_REFRESH_MS);
+
+    return () => {
+      clearInterval(timer);
+      controller?.abort();
     };
   }, [token, offset, search, outcome, realOnly, signOut]);
 

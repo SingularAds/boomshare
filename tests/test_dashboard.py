@@ -28,7 +28,7 @@ async def post(client, **kwargs):
     assert response.status_code == 200
 
 
-async def send_link(client, ai):
+async def send_link(client, ai, wa_id="919876543210"):
     ai.queue_decision(
         AiDecision(
             reply_text="Here you go - takes about a minute to install.",
@@ -36,8 +36,23 @@ async def send_link(client, ai):
             actions=["send_download_link"],
         )
     )
-    await post(client, text="send me the link")
+    await post(client, text="send me the link", wa_id=wa_id)
     await drain_queue()
+
+
+async def link_for(db, phone):
+    return (
+        await db.execute(
+            select(DownloadLink).join(Customer).where(Customer.phone == phone)
+        )
+    ).scalar_one()
+
+
+async def click(client, link):
+    response = await client.post(
+        "/internal/events/click", json={"token": link.token}, headers=AUTH
+    )
+    assert response.status_code == 200
 
 
 class TestDashboardAuth:
@@ -93,6 +108,7 @@ class TestOverview:
         assert body["customers_from_ads"] == 0
         assert body["customers_direct"] == 0
         assert body["links_sent"] == 0
+        assert body["customers_clicked"] == 0
         assert body["conversations"] == 0
         assert body["messages"] == 0
         assert body["leads_by_source"] == []
@@ -116,6 +132,24 @@ class TestOverview:
         assert body["conversations"] == 1
         assert body["messages"] > 0
         assert body["messages_inbound"] + body["messages_outbound"] == body["messages"]
+
+    async def test_clicks_count_people_not_repeat_clicks(self, client, db, ai, meta):
+        """The funnel step is people who opened their link, so a second click
+        from the same person - or a download page that reports every load -
+        must not move it, and someone who never opened theirs is not in it."""
+        await send_link(client, ai, wa_id="919876543210")
+        await send_link(client, ai, wa_id="447700900123")
+        opened = await link_for(db, "919876543210")
+
+        await click(client, opened)
+        await click(client, opened)
+
+        body = (await client.get("/admin/dashboard/overview", headers=ADMIN_AUTH)).json()
+
+        assert body["customers_with_link"] == 2
+        assert body["customers_clicked"] == 1
+        # The existing per-link count is unchanged.
+        assert body["links_clicked"] == 1
 
     async def test_a_customer_with_no_lead_counts_as_direct(self, client, ai, meta):
         """Nobody arrived from an ad, and the dashboard says so rather than
@@ -161,6 +195,42 @@ class TestCustomerList:
         assert row["stage"] == "link_sent"
         assert row["messages"] > 0
         assert row["last_activity_at"] is not None
+
+    async def test_a_row_says_when_the_link_was_first_clicked(self, client, db, ai, meta):
+        await send_link(client, ai)
+
+        before = (await client.get("/admin/dashboard/customers", headers=ADMIN_AUTH)).json()
+        assert before["rows"][0]["clicked_at"] is None
+
+        link = await link_for(db, "919876543210")
+        await click(client, link)
+
+        after = (await client.get("/admin/dashboard/customers", headers=ADMIN_AUTH)).json()
+        assert after["rows"][0]["clicked_at"] is not None
+        clicked = (await db.execute(select(DownloadLink))).scalar_one().clicked_at
+        assert after["rows"][0]["clicked_at"].startswith(clicked.isoformat()[:19])
+
+    async def test_the_clicked_filter_lists_only_people_who_opened_their_link(
+        self, client, db, ai, meta
+    ):
+        await send_link(client, ai, wa_id="919876543210")
+        await send_link(client, ai, wa_id="447700900123")
+        await click(client, await link_for(db, "919876543210"))
+
+        clicked = (
+            await client.get("/admin/dashboard/customers?outcome=clicked", headers=ADMIN_AUTH)
+        ).json()
+        assert clicked["total"] == 1
+        assert [row["phone"] for row in clicked["rows"]] == ["919876543210"]
+
+        # The filters that already existed keep their meaning: clicking is not
+        # downloading, so both people are still in the pipeline.
+        pipeline = (
+            await client.get(
+                "/admin/dashboard/customers?outcome=not_downloaded", headers=ADMIN_AUTH
+            )
+        ).json()
+        assert pipeline["total"] == 2
 
     async def test_search_matches_phone_and_name(self, client, ai, meta):
         await post(client, text="hi")
@@ -436,6 +506,30 @@ class TestHidingTheTeamsOwnNumbers:
         # aggregate most likely to be left unfiltered.
         assert real["messages"] < everything["messages"]
         assert real["messages"] > 0
+
+
+    async def test_clicks_agree_with_the_filter(
+        self, client, db, ai, meta, settings, monkeypatch
+    ):
+        await send_link(client, ai, wa_id="919876543210")
+        await send_link(client, ai, wa_id="910000000001")
+        await click(client, await link_for(db, "919876543210"))
+        await click(client, await link_for(db, "910000000001"))
+        monkeypatch.setattr(settings, "test_phone_numbers", ("910000000001",))
+
+        real = (await client.get("/admin/dashboard/overview", headers=ADMIN_AUTH)).json()
+        everything = (
+            await client.get(
+                "/admin/dashboard/overview?include_test=true", headers=ADMIN_AUTH
+            )
+        ).json()
+        assert real["customers_clicked"] == 1
+        assert everything["customers_clicked"] == 2
+
+        page = (
+            await client.get("/admin/dashboard/customers?outcome=clicked", headers=ADMIN_AUTH)
+        ).json()
+        assert page["total"] == 1
 
 
 class TestUnansweredNumbers:

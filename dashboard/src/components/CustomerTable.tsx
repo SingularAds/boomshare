@@ -7,6 +7,7 @@ const COLUMNS = [
   "Customer & Contact",
   "Attribution",
   "Funnel Stage",
+  "Clicked",
   "Downloaded",
   "Activated",
   "WhatsApp number",
@@ -69,6 +70,7 @@ export function CustomerTable({
       "Downloaded At",
       "Activated At",
       "Created At",
+      "Clicked At",
     ];
     const csvRows = [
       headers.join(","),
@@ -84,6 +86,7 @@ export function CustomerTable({
           r.downloaded_at ?? "",
           r.activated_at ?? "",
           r.created_at,
+          r.clicked_at ?? "",
         ].join(","),
       ),
     ];
@@ -97,8 +100,13 @@ export function CustomerTable({
     document.body.removeChild(link);
   }
 
-  const filterTabs: Array<{ id: Outcome; label: string; dotTone?: "emerald" | "teal" | "rose" }> = [
+  const filterTabs: Array<{
+    id: Outcome;
+    label: string;
+    dotTone?: "emerald" | "teal" | "rose" | "violet";
+  }> = [
     { id: "", label: "All Customers" },
+    { id: "clicked", label: "Clicked", dotTone: "violet" },
     { id: "activated", label: "Activated", dotTone: "emerald" },
     { id: "downloaded", label: "Downloaded", dotTone: "teal" },
     { id: "not_downloaded", label: "In Pipeline" },
@@ -132,7 +140,9 @@ export function CustomerTable({
                           ? "bg-emerald-500"
                           : tab.dotTone === "teal"
                             ? "bg-teal-400"
-                            : "bg-rose-500"
+                            : tab.dotTone === "violet"
+                              ? "bg-violet-500"
+                              : "bg-rose-500"
                       }`}
                     />
                   )}
@@ -274,6 +284,20 @@ export function CustomerTable({
                           <Tag tone={stageTone(row.stage)} dot={row.stage === "activated" || row.stage === "human_handoff"}>
                             {words(row.stage)}
                           </Tag>
+                        ) : (
+                          <Dash />
+                        )}
+                      </td>
+
+                      {/* Clicked - reported by the download page */}
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        {row.clicked_at ? (
+                          <span className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-violet-600 dark:text-violet-400">
+                            <svg className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                            </svg>
+                            <span>{ago(row.clicked_at)}</span>
+                          </span>
                         ) : (
                           <Dash />
                         )}

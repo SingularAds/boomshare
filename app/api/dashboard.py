@@ -226,6 +226,13 @@ async def overview(
                     ),
                     DownloadLink.customer_id,
                 ),
+                # People, not links: the funnel step sits under the one above.
+                total(
+                    select(func.count(func.distinct(DownloadLink.customer_id))).where(
+                        DownloadLink.clicked_at.is_not(None)
+                    ),
+                    DownloadLink.customer_id,
+                ),
                 # Customers reached through an ad, counted once each however
                 # many leads they have. The rest have no lead row at all.
                 total(
@@ -261,6 +268,7 @@ async def overview(
         links_sent,
         links_clicked,
         customers_with_link,
+        customers_clicked,
         from_ads,
         with_any_lead,
         conversation_count,
@@ -317,6 +325,7 @@ async def overview(
         links_sent=links_sent,
         links_clicked=links_clicked,
         customers_with_link=customers_with_link,
+        customers_clicked=customers_clicked,
         conversations=conversation_count,
         conversations_open=conversations_open,
         messages=message_count,
@@ -337,7 +346,13 @@ def _customer_filter(
     if search:
         term = f"%{search.strip()}%"
         stmt = stmt.where(or_(Customer.phone.ilike(term), Customer.full_name.ilike(term)))
-    if outcome == "activated":
+    if outcome == "clicked":
+        stmt = stmt.where(
+            select(DownloadLink.id)
+            .where(DownloadLink.customer_id == Customer.id, DownloadLink.clicked_at.is_not(None))
+            .exists()
+        )
+    elif outcome == "activated":
         stmt = stmt.where(Customer.activated_at.is_not(None))
     elif outcome == "downloaded":
         stmt = stmt.where(Customer.downloaded_at.is_not(None))
@@ -362,7 +377,7 @@ async def customer_page(
 ) -> CustomerPage:
     """One page of customers, with the facts the table shows.
 
-    Related counts are fetched for the page's ids rather than per row: four
+    Related facts are fetched for the page's ids rather than per row: five
     bounded queries whatever the page size, instead of one query per customer.
     """
     # The row count rides along on the page query as a window function, so
@@ -415,6 +430,18 @@ async def customer_page(
         # The first lead wins: it is the one that brought them in.
         origins.setdefault(customer_id, (str(source), campaign_name))
 
+    # The first time they opened a link. Only the first click on each link is
+    # ever recorded, so the earliest across their links is when they first did.
+    first_clicks = dict(
+        (
+            await session.execute(
+                select(DownloadLink.customer_id, func.min(DownloadLink.clicked_at))
+                .where(DownloadLink.customer_id.in_(ids), DownloadLink.clicked_at.is_not(None))
+                .group_by(DownloadLink.customer_id)
+            )
+        ).all()
+    )
+
     message_counts = dict(
         (
             await session.execute(
@@ -436,6 +463,7 @@ async def customer_page(
                 phone=customer.phone,
                 full_name=customer.full_name,
                 created_at=customer.created_at,
+                clicked_at=first_clicks.get(customer.id),
                 downloaded_at=customer.downloaded_at,
                 activated_at=customer.activated_at,
                 opted_out_at=customer.opted_out_at,
